@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert } f
 import { Ionicons } from '@expo/vector-icons';
 import NotificationService from '../../src/services/NotificationService';
 import TransitMonitorService from '../../src/services/TransitMonitorService';
+import LocationService from '../../src/services/LocationService';
 
 export default function SettingsScreen() {
     const [notificationsEnabled, setNotificationsEnabled] = useState(false);
@@ -22,6 +23,9 @@ export default function SettingsScreen() {
     const checkMonitoringStatus = async () => {
         const isRegistered = await TransitMonitorService.isTransitMonitorRegistered();
         setMonitoringEnabled(isRegistered);
+
+        const isTracking = await LocationService.isTracking();
+        setLocationEnabled(isTracking);
     };
 
     const handleNotificationToggle = async (value: boolean) => {
@@ -120,7 +124,22 @@ export default function SettingsScreen() {
                     </View>
                     <Switch
                         value={locationEnabled}
-                        onValueChange={setLocationEnabled}
+                        onValueChange={async (value) => {
+                            if (value) {
+                                const granted = await LocationService.requestPermissions();
+                                if (granted) {
+                                    await LocationService.startTracking();
+                                    setLocationEnabled(true);
+                                    Alert.alert('Tracking Enabled', 'Thank you for helping improve transit accuracy!');
+                                } else {
+                                    Alert.alert('Permission Denied', 'Location permission is required for this feature.');
+                                    setLocationEnabled(false);
+                                }
+                            } else {
+                                await LocationService.stopTracking();
+                                setLocationEnabled(false);
+                            }
+                        }}
                         trackColor={{ false: '#ccc', true: '#0066CC' }}
                     />
                 </View>

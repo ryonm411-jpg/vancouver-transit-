@@ -3,6 +3,7 @@ import * as BackgroundFetch from 'expo-background-fetch';
 import NotificationService from './NotificationService';
 import RoutineService from './RoutineService';
 import TransLinkService from './TransLinkService';
+import RouteOptimizationService from './RouteOptimizationService';
 import { appConfig } from '../config/config';
 import { Routine } from '../models/types';
 
@@ -103,6 +104,27 @@ async function checkForDelays(routine: Routine, segment: any) {
                 );
 
                 console.log(`[TransitMonitor] Delay detected: Route ${segment.routeNumber}, ${update.delay} minutes`);
+
+                // Check for alternative routes
+                try {
+                    const suggestion = await RouteOptimizationService.findAlternativeRoutes(
+                        segment.routeNumber,
+                        segment.destination,
+                        update.delay
+                    );
+
+                    if (suggestion) {
+                        await NotificationService.sendRouteSuggestion(
+                            suggestion.originalRoute,
+                            suggestion.alternativeRoute,
+                            suggestion.timeSavings,
+                            routine.id
+                        );
+                        console.log(`[TransitMonitor] Route suggestion sent: Take ${suggestion.alternativeRoute} to save ${suggestion.timeSavings} mins`);
+                    }
+                } catch (optError) {
+                    console.error('[TransitMonitor] Error finding alternatives:', optError);
+                }
             }
         }
     } catch (error) {

@@ -109,6 +109,17 @@ class TransLinkService {
 
             // Parse GTFS-RT protobuf data
             // TODO: Implement actual parsing logic
+            // Mock data for development - Simulate a delay on route 99
+            if (routeNo === '99') {
+                return [{
+                    routeNo: '99',
+                    stopNo: stopNo,
+                    scheduledTime: new Date().toISOString(),
+                    estimatedTime: new Date(Date.now() + 15 * 60000).toISOString(), // 15 min delay
+                    delay: 15,
+                    status: 'DELAYED'
+                }];
+            }
             return [];
         } catch (error) {
             console.error('Error fetching trip updates:', error);
