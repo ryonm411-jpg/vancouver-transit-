@@ -1,137 +1,216 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Platform, TextInput } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import RoutineCard from '../../src/components/RoutineCard';
-import RoutineService from '../../src/services/RoutineService';
-import { Routine } from '../../src/models/types';
+import * as Location from 'expo-location';
+import TransitMap from '../../src/components/TransitMap';
+import TransLinkService, { TransitRoute } from '../../src/services/TransLinkService';
+
+interface NearbyRoute {
+    route: TransitRoute;
+    nextArrival?: string;
+    delay?: number;
+    distance: number;
+}
 
 export default function HomeScreen() {
     const router = useRouter();
-    const [routines, setRoutines] = useState<Routine[]>([]);
+    const [nearbyRoutes, setNearbyRoutes] = useState<NearbyRoute[]>([]);
     const [loading, setLoading] = useState(true);
-    const [refreshing, setRefreshing] = useState(false);
-
-    // TODO: Replace with actual user ID from authentication
-    const userId = 'demo-user';
-
-    const loadRoutines = async () => {
-        try {
-            const userRoutines = await RoutineService.getActiveRoutines(userId);
-            setRoutines(userRoutines);
-        } catch (error) {
-            console.error('Error loading routines:', error);
-        } finally {
-            setLoading(false);
-            setRefreshing(false);
-        }
-    };
+    const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+    const [searchQuery, setSearchQuery] = useState('');
 
     useEffect(() => {
-        loadRoutines();
+        initializeLocation();
     }, []);
 
-    const onRefresh = () => {
-        setRefreshing(true);
-        loadRoutines();
-    };
+    useEffect(() => {
+        if (userLocation) {
+            fetchNearbyRoutes();
+        }
+    }, [userLocation]);
 
-    const handleToggleRoutine = async (routineId: string, active: boolean) => {
+    const initializeLocation = async () => {
         try {
-            await RoutineService.toggleRoutineActive(routineId, active);
-            loadRoutines();
+            const { status } = await Location.requestForegroundPermissionsAsync();
+            if (status !== 'granted') {
+                console.log('[Home] Location permission denied');
+                setLoading(false);
+                return;
+            }
+
+            const location = await Location.getCurrentPositionAsync({});
+            setUserLocation({
+                latitude: location.coords.latitude,
+                longitude: location.coords.longitude,
+            });
+            setLoading(false);
         } catch (error) {
-            console.error('Error toggling routine:', error);
+            console.error('[Home] Error getting location:', error);
+            setLoading(false);
         }
     };
 
-    const getNextScheduledTime = () => {
-        if (routines.length === 0) return null;
+    const fetchNearbyRoutes = async () => {
+        if (!userLocation) return;
 
-        // Get the earliest time from all active routines
-        const now = new Date();
-        const currentTime = now.getHours() * 60 + now.getMinutes();
+        try {
+            console.log('[Home] Fetching nearby routes...');
+            const allRoutes = await TransLinkService.getRoutes();
+            const nearby: NearbyRoute[] = [];
 
-        let nextRoutine = null;
-        let minDiff = Infinity;
+            // Check a subset of popular routes for nearby stops
+            const popularRoutes = allRoutes.slice(0, 10); // Limit to avoid too many API calls
 
-        routines.forEach(routine => {
-            routine.segments.forEach(segment => {
-                const [hours, minutes] = segment.scheduledTime.split(':').map(Number);
-                const segmentTime = hours * 60 + minutes;
-                const diff = segmentTime - currentTime;
+            for (const route of popularRoutes) {
+                try {
+                    const stops = await TransLinkService.getStopsForRoute(route.routeNo);
 
-                if (diff > 0 && diff < minDiff) {
-                    minDiff = diff;
-                    nextRoutine = { routine, segment };
+                    // Find nearest stop
+                    let nearestStop = null;
+                    let minDistance = Infinity;
+
+                    for (const stop of stops) {
+                        const distance = calculateDistance(
+                            userLocation.latitude,
+                            userLocation.longitude,
+                            stop.latitude,
+                            stop.longitude
+                        );
+                        if (distance < minDistance) {
+                            minDistance = distance;
+                            nearestStop = stop;
+                        }
+                    }
+
+                    // Only include routes with stops within 1km
+                    if (nearestStop && minDistance < 1) {
+                        // Get real-time arrival for this stop
+                        const tripUpdates = await TransLinkService.getTripUpdates(
+                            route.routeNo,
+                            nearestStop.stopNo
+                        );
+
+                        nearby.push({
+                            route,
+                            distance: minDistance,
+                            delay: tripUpdates[0]?.delay || 0,
+                            nextArrival: tripUpdates[0] ? calculateMinutesUntil(tripUpdates[0].estimatedTime) : undefined,
+                        });
+                    }
+                } catch (error) {
+                    console.error(`[Home] Error fetching stops for route ${route.routeNo}:`, error);
                 }
-            });
-        });
+            }
 
-        return nextRoutine;
+            // Sort by distance
+            nearby.sort((a, b) => a.distance - b.distance);
+            setNearbyRoutes(nearby.slice(0, 5)); // Show top 5
+            console.log(`[Home] Found ${nearby.length} nearby routes`);
+        } catch (error) {
+            console.error('[Home] Error fetching nearby routes:', error);
+        }
     };
 
-    const nextScheduled = getNextScheduledTime();
+    const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+        const R = 6371;
+        const dLat = toRad(lat2 - lat1);
+        const dLon = toRad(lon2 - lon1);
+        const a =
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+    };
+
+    const toRad = (degrees: number) => degrees * (Math.PI / 180);
+
+    const calculateMinutesUntil = (isoTime: string): string => {
+        const now = new Date();
+        const arrival = new Date(isoTime);
+        const diff = Math.round((arrival.getTime() - now.getTime()) / 60000);
+        return diff > 0 ? `${diff}min` : 'Now';
+    };
+
+    const getDelayColor = (delay?: number) => {
+        if (!delay || delay < 3) return '#4CAF50'; // Green
+        if (delay < 8) return '#FF9800'; // Orange
+        return '#F44336'; // Red
+    };
 
     return (
         <View style={styles.container}>
-            <ScrollView
-                style={styles.scrollView}
-                refreshControl={
-                    <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-                }
-            >
-                <View style={styles.header}>
-                    <Text style={styles.headerText}>Your Transit Routines</Text>
-                    {nextScheduled && (
-                        <View style={styles.nextTransitCard}>
-                            <Ionicons name="time-outline" size={20} color="#0066CC" />
-                            <View style={styles.nextTransitInfo}>
-                                <Text style={styles.nextTransitLabel}>Next Transit</Text>
-                                <Text style={styles.nextTransitText}>
-                                    #{nextScheduled.segment.routeNumber} at {nextScheduled.segment.scheduledTime}
-                                </Text>
-                            </View>
+            {/* Map View */}
+            <View style={styles.mapContainer}>
+                <TransitMap />
+            </View>
+
+            {/* Search Bar Overlay */}
+            <View style={styles.searchOverlay}>
+                <View style={styles.searchBar}>
+                    <Ionicons name="search" size={20} color="#999" />
+                    <TextInput
+                        style={styles.searchInput}
+                        placeholder="Where to?"
+                        placeholderTextColor="#999"
+                        value={searchQuery}
+                        onChangeText={setSearchQuery}
+                    />
+                    <Ionicons name="home" size={20} color="#0066CC" />
+                </View>
+            </View>
+
+            {/* Nearby Routes Bottom Sheet - Hide on web */}
+            {Platform.OS !== 'web' && (
+                <View style={styles.bottomSheet}>
+                    <View style={styles.sheetHandle} />
+                    <Text style={styles.sheetTitle}>Nearby Routes</Text>
+
+                    {loading ? (
+                        <View style={styles.loadingContainer}>
+                            <ActivityIndicator color="#0066CC" />
                         </View>
+                    ) : nearbyRoutes.length === 0 ? (
+                        <View style={styles.emptyContainer}>
+                            <Ionicons name="navigate-outline" size={32} color="#ccc" />
+                            <Text style={styles.emptyText}>No nearby routes found</Text>
+                        </View>
+                    ) : (
+                        <ScrollView style={styles.routesList}>
+                            {nearbyRoutes.map((item, index) => (
+                                <TouchableOpacity
+                                    key={index}
+                                    style={[
+                                        styles.routeCard,
+                                        { backgroundColor: getDelayColor(item.delay) }
+                                    ]}
+                                    onPress={() => {
+                                        // TODO: Navigate to route details
+                                        console.log('Selected route:', item.route.routeNo);
+                                    }}
+                                >
+                                    <View style={styles.routeInfo}>
+                                        <Text style={styles.routeNumber}>{item.route.routeNo}</Text>
+                                        <Text style={styles.routeDestination}>
+                                            {item.route.direction} to {item.route.destination}
+                                        </Text>
+                                        <Text style={styles.routeStop}>
+                                            {Math.round(item.distance * 1000)}m away
+                                        </Text>
+                                    </View>
+                                    <View style={styles.arrivalInfo}>
+                                        <Text style={styles.arrivalTime}>
+                                            {item.nextArrival || '—'}
+                                        </Text>
+                                        <Text style={styles.arrivalLabel}>minutes</Text>
+                                    </View>
+                                </TouchableOpacity>
+                            ))}
+                        </ScrollView>
                     )}
                 </View>
-
-                {loading ? (
-                    <View style={styles.emptyState}>
-                        <Text style={styles.emptyStateText}>Loading routines...</Text>
-                    </View>
-                ) : routines.length === 0 ? (
-                    <View style={styles.emptyState}>
-                        <Ionicons name="bus-outline" size={64} color="#ccc" />
-                        <Text style={styles.emptyStateText}>No routines yet</Text>
-                        <Text style={styles.emptyStateSubText}>
-                            Tap the button below to create your first transit routine
-                        </Text>
-                    </View>
-                ) : (
-                    <View style={styles.routinesList}>
-                        {routines.map(routine => (
-                            <RoutineCard
-                                key={routine.id}
-                                routine={routine}
-                                onPress={() => {
-                                    // TODO: Navigate to routine detail
-                                    console.log('View routine:', routine.id);
-                                }}
-                                onToggle={(active) => handleToggleRoutine(routine.id, active)}
-                            />
-                        ))}
-                    </View>
-                )}
-            </ScrollView>
-
-            <TouchableOpacity
-                style={styles.addButton}
-                onPress={() => router.push('/create-routine')}
-            >
-                <Ionicons name="add-circle" size={24} color="#fff" />
-                <Text style={styles.addButtonText}>Add New Routine</Text>
-            </TouchableOpacity>
+            )}
         </View>
     );
 }
@@ -139,82 +218,120 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
     container: {
         flex: 1,
-        backgroundColor: '#f5f5f5',
     },
-    scrollView: {
+    mapContainer: {
         flex: 1,
     },
-    header: {
+    searchOverlay: {
+        position: 'absolute',
+        top: 50,
+        left: 16,
+        right: 16,
+    },
+    searchBar: {
         backgroundColor: '#fff',
-        padding: 20,
-        borderBottomWidth: 1,
-        borderBottomColor: '#e0e0e0',
-    },
-    headerText: {
-        fontSize: 24,
-        fontWeight: 'bold',
-        color: '#333',
-        marginBottom: 12,
-    },
-    nextTransitCard: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        backgroundColor: '#E6F2FF',
-        padding: 12,
-        borderRadius: 8,
-    },
-    nextTransitInfo: {
-        marginLeft: 12,
-    },
-    nextTransitLabel: {
-        fontSize: 12,
-        color: '#666',
-    },
-    nextTransitText: {
-        fontSize: 15,
-        fontWeight: '600',
-        color: '#0066CC',
-        marginTop: 2,
-    },
-    emptyState: {
-        alignItems: 'center',
-        justifyContent: 'center',
-        paddingVertical: 60,
-    },
-    emptyStateText: {
-        fontSize: 18,
-        fontWeight: '600',
-        color: '#999',
-        marginTop: 16,
-    },
-    emptyStateSubText: {
-        fontSize: 14,
-        color: '#aaa',
-        marginTop: 8,
-        textAlign: 'center',
-        paddingHorizontal: 40,
-    },
-    routinesList: {
-        paddingVertical: 8,
-    },
-    addButton: {
-        backgroundColor: '#0066CC',
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 16,
-        margin: 20,
         borderRadius: 12,
+        padding: 16,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 2 },
         shadowOpacity: 0.1,
         shadowRadius: 4,
-        elevation: 3,
+        elevation: 5,
     },
-    addButtonText: {
-        color: '#fff',
+    searchInput: {
+        flex: 1,
         fontSize: 16,
-        fontWeight: '600',
-        marginLeft: 8,
+        color: '#333',
+    },
+    bottomSheet: {
+        position: 'absolute',
+        bottom: 0,
+        left: 0,
+        right: 0,
+        backgroundColor: '#fff',
+        borderTopLeftRadius: 20,
+        borderTopRightRadius: 20,
+        paddingTop: 8,
+        paddingBottom: 20,
+        maxHeight: '40%',
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
+        elevation: 10,
+    },
+    sheetHandle: {
+        width: 40,
+        height: 4,
+        backgroundColor: '#ddd',
+        borderRadius: 2,
+        alignSelf: 'center',
+        marginBottom: 12,
+    },
+    sheetTitle: {
+        fontSize: 18,
+        fontWeight: '700',
+        color: '#333',
+        paddingHorizontal: 20,
+        marginBottom: 12,
+    },
+    loadingContainer: {
+        padding: 40,
+        alignItems: 'center',
+    },
+    emptyContainer: {
+        padding: 40,
+        alignItems: 'center',
+    },
+    emptyText: {
+        marginTop: 8,
+        fontSize: 14,
+        color: '#999',
+    },
+    routesList: {
+        paddingHorizontal: 16,
+    },
+    routeCard: {
+        flexDirection: 'row',
+        borderRadius: 12,
+        padding: 16,
+        marginBottom: 12,
+        alignItems: 'center',
+    },
+    routeInfo: {
+        flex: 1,
+    },
+    routeNumber: {
+        fontSize: 24,
+        fontWeight: '700',
+        color: '#fff',
+    },
+    routeDestination: {
+        fontSize: 14,
+        color: '#fff',
+        marginTop: 4,
+        opacity: 0.9,
+    },
+    routeStop: {
+        fontSize: 12,
+        color: '#fff',
+        marginTop: 2,
+        opacity: 0.8,
+    },
+    arrivalInfo: {
+        alignItems: 'flex-end',
+    },
+    arrivalTime: {
+        fontSize: 32,
+        fontWeight: '700',
+        color: '#fff',
+    },
+    arrivalLabel: {
+        fontSize: 12,
+        color: '#fff',
+        opacity: 0.9,
     },
 });

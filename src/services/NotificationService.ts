@@ -7,6 +7,8 @@ Notifications.setNotificationHandler({
         shouldShowAlert: true,
         shouldPlaySound: true,
         shouldSetBadge: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
     }),
 });
 
@@ -22,6 +24,7 @@ export interface NotificationData {
     routeNo?: string;
     delay?: number;
     alternativeRoute?: string;
+    [key: string]: unknown;
 }
 
 class NotificationService {
@@ -162,7 +165,7 @@ class NotificationService {
                 data: data || {},
                 sound: true,
             },
-            trigger: triggerDate,
+            trigger: { type: 'date', date: triggerDate } as any,
         });
 
         return identifier;

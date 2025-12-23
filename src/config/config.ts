@@ -12,10 +12,11 @@ export const firebaseConfig = {
 };
 
 // TransLink API Configuration
+// Using local proxy server to bypass Expo Go limitations
 export const translinkConfig = {
-    apiKey: "rrOqsgnp559mX9Ul3Jzn",
-    baseUrl: "https://api.translink.ca/rttiapi/v1",
-    gtfsRtUrl: "https://gtfs.translink.ca/v3"
+    apiKey: "chW7YWFXZeKGiBfEJnYD",
+    baseUrl: "http://192.168.1.85:3001/api", // Proxy server (use your computer's IP)
+    gtfsRtUrl: "http://192.168.1.85:3001/api/gtfs"
 };
 
 // App Configuration

@@ -1,7 +1,8 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Routine } from '../models/types';
+import TransLinkService from '../services/TransLinkService';
 
 interface RoutineCardProps {
     routine: Routine;
@@ -9,7 +10,61 @@ interface RoutineCardProps {
     onToggle?: (active: boolean) => void;
 }
 
+interface SegmentStatus {
+    delay: number;
+    status: 'ON_TIME' | 'DELAYED' | 'CANCELLED';
+    loading: boolean;
+}
+
 export default function RoutineCard({ routine, onPress, onToggle }: RoutineCardProps) {
+    const [segmentStatuses, setSegmentStatuses] = useState<{ [key: string]: SegmentStatus }>({});
+
+    useEffect(() => {
+        // Only fetch status for active routines
+        if (!routine.active) return;
+
+        const fetchStatuses = async () => {
+            for (const segment of routine.segments) {
+                // Set loading state
+                setSegmentStatuses(prev => ({
+                    ...prev,
+                    [segment.id]: { delay: 0, status: 'ON_TIME', loading: true }
+                }));
+
+                try {
+                    const updates = await TransLinkService.getTripUpdates(
+                        segment.routeNumber,
+                        segment.stopId || ''
+                    );
+
+                    if (updates && updates.length > 0) {
+                        setSegmentStatuses(prev => ({
+                            ...prev,
+                            [segment.id]: {
+                                delay: updates[0].delay,
+                                status: updates[0].status,
+                                loading: false
+                            }
+                        }));
+                    } else {
+                        setSegmentStatuses(prev => ({
+                            ...prev,
+                            [segment.id]: { delay: 0, status: 'ON_TIME', loading: false }
+                        }));
+                    }
+                } catch (error) {
+                    console.error('[RoutineCard] Error fetching trip updates:', error);
+                    setSegmentStatuses(prev => ({
+                        ...prev,
+                        [segment.id]: { delay: 0, status: 'ON_TIME', loading: false }
+                    }));
+                }
+            }
+        };
+
+        fetchStatuses();
+    }, [routine.active, routine.segments]);
+
     const getFrequencyText = () => {
         if (routine.frequency === 'daily') return 'Daily';
         if (routine.frequency === 'weekly') {
@@ -25,6 +80,15 @@ export default function RoutineCard({ routine, onPress, onToggle }: RoutineCardP
             case 'skytrain': return 'train';
             case 'seabus': return 'boat';
             default: return 'navigate';
+        }
+    };
+
+    const getStatusColor = (status?: 'ON_TIME' | 'DELAYED' | 'CANCELLED') => {
+        switch (status) {
+            case 'ON_TIME': return '#4CAF50';
+            case 'DELAYED': return '#FF9800';
+            case 'CANCELLED': return '#F44336';
+            default: return '#999';
         }
     };
 
@@ -52,26 +116,45 @@ export default function RoutineCard({ routine, onPress, onToggle }: RoutineCardP
             </View>
 
             <View style={styles.segments}>
-                {routine.segments.map((segment, index) => (
-                    <View key={segment.id} style={styles.segment}>
-                        <View style={styles.segmentIcon}>
-                            <Ionicons
-                                name={getTransitIcon(segment.transitType) as any}
-                                size={20}
-                                color="#0066CC"
-                            />
+                {routine.segments.map((segment, index) => {
+                    const segmentStatus = segmentStatuses[segment.id];
+
+                    return (
+                        <View key={segment.id} style={styles.segment}>
+                            <View style={styles.segmentIcon}>
+                                <Ionicons
+                                    name={getTransitIcon(segment.transitType) as any}
+                                    size={20}
+                                    color="#0066CC"
+                                />
+                            </View>
+                            <View style={styles.segmentInfo}>
+                                <View style={styles.routeRow}>
+                                    <Text style={styles.routeNumber}>#{segment.routeNumber}</Text>
+                                    {routine.active && segmentStatus && (
+                                        segmentStatus.loading ? (
+                                            <ActivityIndicator size="small" color="#999" />
+                                        ) : (
+                                            <View style={[styles.statusBadge, { backgroundColor: getStatusColor(segmentStatus.status) }]}>
+                                                <Text style={styles.statusText}>
+                                                    {segmentStatus.status === 'ON_TIME' ? 'ON TIME' :
+                                                        segmentStatus.status === 'DELAYED' ? `+${segmentStatus.delay}m` :
+                                                            'CANCELLED'}
+                                                </Text>
+                                            </View>
+                                        )
+                                    )}
+                                </View>
+                                <Text style={styles.stopName}>{segment.stopName}</Text>
+                                <Text style={styles.destination}>→ {segment.destination}</Text>
+                            </View>
+                            <Text style={styles.time}>{segment.scheduledTime}</Text>
+                            {index < routine.segments.length - 1 && (
+                                <View style={styles.connector} />
+                            )}
                         </View>
-                        <View style={styles.segmentInfo}>
-                            <Text style={styles.routeNumber}>#{segment.routeNumber}</Text>
-                            <Text style={styles.stopName}>{segment.stopName}</Text>
-                            <Text style={styles.destination}>→ {segment.destination}</Text>
-                        </View>
-                        <Text style={styles.time}>{segment.scheduledTime}</Text>
-                        {index < routine.segments.length - 1 && (
-                            <View style={styles.connector} />
-                        )}
-                    </View>
-                ))}
+                    );
+                })}
             </View>
         </TouchableOpacity>
     );
@@ -136,10 +219,25 @@ const styles = StyleSheet.create({
     segmentInfo: {
         flex: 1,
     },
+    routeRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
     routeNumber: {
         fontSize: 15,
         fontWeight: '600',
         color: '#0066CC',
+    },
+    statusBadge: {
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 4,
+    },
+    statusText: {
+        fontSize: 10,
+        fontWeight: '600',
+        color: '#fff',
     },
     stopName: {
         fontSize: 13,
@@ -165,3 +263,4 @@ const styles = StyleSheet.create({
         backgroundColor: '#E6F2FF',
     },
 });
+
