@@ -1,5 +1,6 @@
 import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
 import { TripUpdate, VehiclePosition } from '../services/TransLinkService';
+import { getRouteDisplayName } from '../data/routes';
 
 export interface ServiceAlert {
     id: string;
@@ -92,6 +93,7 @@ export class GtfsParser {
             );
 
             const positions: VehiclePosition[] = [];
+            let loggedOnce = false;
 
             for (const entity of feed.entity) {
                 if (!entity.vehicle) continue;
@@ -100,15 +102,29 @@ export class GtfsParser {
                 const trip = vehicle.trip;
                 const position = vehicle.position;
 
-                if (!trip || !position) continue;
+                if (!position) continue;
 
-                const routeId = trip.routeId || '';
+                // Get route ID and map to public route number
+                const routeId = trip?.routeId || '';
+                const routeNo = getRouteDisplayName(routeId);
+
+                // Log first entity for debugging
+                if (!loggedOnce) {
+                    console.log('[GtfsParser] Sample vehicle entity:', {
+                        vehicleId: vehicle.vehicle?.id,
+                        routeId: routeId,
+                        mappedRouteNo: routeNo,
+                        lat: position.latitude,
+                        lon: position.longitude
+                    });
+                    loggedOnce = true;
+                }
 
                 // Filter by route if specified
-                if (filterRouteNo && routeId !== filterRouteNo) continue;
+                if (filterRouteNo && routeNo !== filterRouteNo) continue;
 
                 positions.push({
-                    routeNo: routeId,
+                    routeNo: routeNo,
                     latitude: position.latitude || 0,
                     longitude: position.longitude || 0,
                     bearing: position.bearing || 0,
@@ -117,6 +133,7 @@ export class GtfsParser {
                 });
             }
 
+            console.log(`[GtfsParser] Parsed ${positions.length} vehicle positions`);
             return positions;
         } catch (error) {
             console.error('[GtfsParser] Error parsing vehicle positions:', error);

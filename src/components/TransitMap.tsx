@@ -41,13 +41,17 @@ export default function TransitMap({ onBusPress }: TransitMapProps) {
 
             const location = await Location.getCurrentPositionAsync({});
 
-            // For demo purposes, center on Vancouver where mock buses are
-            // In production, use actual user location
+            console.log('[TransitMap] Got user location:', {
+                lat: location.coords.latitude,
+                lon: location.coords.longitude
+            });
+
+            // Use ACTUAL user location
             const region: Region = {
-                latitude: 49.2827, // Vancouver downtown
-                longitude: -123.1207,
-                latitudeDelta: 0.15, // Wider zoom to see all mock buses
-                longitudeDelta: 0.15,
+                latitude: location.coords.latitude,
+                longitude: location.coords.longitude,
+                latitudeDelta: 0.05, // Tighter zoom on user location
+                longitudeDelta: 0.05,
             };
 
             setUserLocation(region);
@@ -58,8 +62,8 @@ export default function TransitMap({ onBusPress }: TransitMapProps) {
             const region: Region = {
                 latitude: 49.2827,
                 longitude: -123.1207,
-                latitudeDelta: 0.15,
-                longitudeDelta: 0.15,
+                latitudeDelta: 0.1,
+                longitudeDelta: 0.1,
             };
             setUserLocation(region);
             setLoading(false);
@@ -70,27 +74,29 @@ export default function TransitMap({ onBusPress }: TransitMapProps) {
         try {
             console.log('[TransitMap] Fetching nearby buses...');
 
-            // Get all vehicle positions (TransLink doesn't filter by location on server)
+            // Get all vehicle positions
             const allVehicles = await TransLinkService.getVehiclePositions('');
 
             if (!userLocation) return;
 
-            // For mock data, show all buses (don't filter by distance)
-            // For real data, filter to buses within ~10km
-            const nearbyBuses = allVehicles.length > 0 && allVehicles.length <= 10
-                ? allVehicles // Likely mock data (small set), show all
-                : allVehicles.filter(bus => {
-                    if (!bus.latitude || !bus.longitude) return false;
-                    const distance = calculateDistance(
+            // Calculate distance for each bus and sort by distance
+            const busesWithDistance = allVehicles
+                .filter(bus => bus.latitude && bus.longitude)
+                .map(bus => ({
+                    ...bus,
+                    distance: calculateDistance(
                         userLocation.latitude,
                         userLocation.longitude,
                         bus.latitude,
                         bus.longitude
-                    );
-                    return distance < 10; // 10km radius for real data
-                });
+                    )
+                }))
+                .sort((a, b) => a.distance - b.distance);
 
-            console.log(`[TransitMap] Found ${nearbyBuses.length} nearby buses`);
+            // Limit to nearest 25 buses for performance
+            const nearbyBuses = busesWithDistance.slice(0, 25);
+
+            console.log(`[TransitMap] Showing ${nearbyBuses.length} nearest buses (of ${allVehicles.length} total)`);
             setBuses(nearbyBuses);
         } catch (err: any) {
             console.error('[TransitMap] Error fetching buses:', err);

@@ -5,143 +5,103 @@ const cors = require('cors');
 const app = express();
 const PORT = 3001;
 
+// TransLink GTFS-RT API (API key IS required)
+const GTFS_RT_BASE = 'https://gtfsapi.translink.ca/v3';
+const API_KEY = 'chW7YWFXZeKGiBfEJnYD';
+
 // Enable CORS for Expo Go
 app.use(cors());
 app.use(express.json());
 
-// TransLink API configuration
-const TRANSLINK_API_KEY = 'chW7YWFXZeKGiBfEJnYD';
-const TRANSLINK_BASE_URL = 'https://api.translink.ca/rttiapi/v1';
-const TRANSLINK_GTFS_URL = 'https://gtfs.translink.ca/v3';
+// Request logger
+app.use((req, res, next) => {
+    console.log(`📥 ${req.method} ${req.url}`);
+    next();
+});
 
-// Helper for TransLink requests
-const fetchTransLink = async (url, config = {}) => {
-    // Try request with apikey param
+// Health check
+app.get('/', (req, res) => {
+    res.json({ status: 'TransLink Proxy Running' });
+});
+
+// ============================================
+// GTFS-RT ROUTES (API key required)
+// ============================================
+
+// Vehicle Positions
+app.get('/gtfs/gtfsposition', async (req, res) => {
+    console.log('[GTFS] Fetching vehicle positions...');
     try {
-        return await axios.get(url, {
-            ...config,
-            params: { ...config.params, apikey: TRANSLINK_API_KEY }
+        const response = await axios.get(`${GTFS_RT_BASE}/gtfsposition`, {
+            params: { apikey: API_KEY },
+            responseType: 'arraybuffer',
+            timeout: 20000
         });
+        console.log(`[GTFS] ✅ Got ${response.data.length} bytes`);
+        res.set('Content-Type', 'application/x-protobuf');
+        res.send(response.data);
     } catch (error) {
-        // If 403, and it was a GTFS request, try with Header
-        if (error.response?.status === 403) {
-            console.log(`[Proxy] 403 with param, retrying with Header...`);
-            return await axios.get(url, {
-                ...config,
-                params: config.params, // Keep original params but remove apikey if it was strictly disallowed (usually fine to keep)
-                headers: {
-                    ...config.headers,
-                    'Authorization': `${TRANSLINK_API_KEY}` // Sometimes just the key? Or Bearer?
-                    // Search result said "Bearer", let's try that if this fails? 
-                    // Actually let's try passing it exactly as search result said: Authorization: Bearer <Key>
-                }
-            });
+        console.error('[GTFS] ❌', error.response?.status || error.code, error.message);
+        res.status(error.response?.status || 500).json({ error: error.message });
+    }
+});
+
+// Trip Updates (realtime delays)
+app.get('/gtfs/gtfsrealtime', async (req, res) => {
+    console.log('[GTFS] Fetching trip updates...');
+    try {
+        const response = await axios.get(`${GTFS_RT_BASE}/gtfsrealtime`, {
+            params: { apikey: API_KEY },
+            responseType: 'arraybuffer',
+            timeout: 20000
+        });
+        console.log(`[GTFS] ✅ Got ${response.data.length} bytes`);
+        res.set('Content-Type', 'application/x-protobuf');
+        res.send(response.data);
+    } catch (error) {
+        console.error('[GTFS] ❌', error.response?.status || error.code, error.message);
+        res.status(error.response?.status || 500).json({ error: error.message });
+    }
+});
+
+// Service Alerts
+app.get('/gtfs/gtfsalerts', async (req, res) => {
+    console.log('[GTFS] Fetching service alerts...');
+    try {
+        const response = await axios.get(`${GTFS_RT_BASE}/gtfsalerts`, {
+            params: { apikey: API_KEY },
+            responseType: 'arraybuffer',
+            timeout: 20000
+        });
+        console.log(`[GTFS] ✅ Got ${response.data.length} bytes`);
+        res.set('Content-Type', 'application/x-protobuf');
+        res.send(response.data);
+    } catch (error) {
+        console.error('[GTFS] ❌', error.response?.status || error.code, error.message);
+        res.status(error.response?.status || 500).json({ error: error.message });
+    }
+});
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+    console.log('='.repeat(50));
+    console.log('🚀 TransLink GTFS-RT Proxy Running');
+    console.log(`📍 http://192.168.1.85:${PORT}`);
+    console.log('='.repeat(50));
+
+    // Test connectivity WITH API key
+    console.log('\n🔍 Testing GTFS-RT connectivity (with API key)...');
+    axios.get(`${GTFS_RT_BASE}/gtfsposition`, {
+        params: { apikey: API_KEY },
+        responseType: 'arraybuffer',
+        timeout: 10000
+    }).then(res => {
+        console.log(`✅ GTFS-RT working! Got ${res.data.length} bytes of vehicle data`);
+    }).catch(err => {
+        console.log(`❌ GTFS-RT error: ${err.response?.status || err.code} - ${err.message}`);
+        if (err.response?.status === 403) {
+            console.log('   → API key may be invalid or not activated');
+            console.log('   → Register at: https://developer.translink.ca/');
         }
-        throw error;
-    }
-};
-
-// Proxy for REST API routes
-app.get('/api/routes', async (req, res) => {
-    try {
-        console.log('[Proxy] Fetching routes from TransLink...');
-        const response = await axios.get(`${TRANSLINK_BASE_URL}/routes`, {
-            params: { apikey: TRANSLINK_API_KEY },
-            headers: { accept: 'application/JSON' }
-        });
-        res.json(response.data);
-    } catch (error) {
-        console.error('[Proxy] Error fetching routes:', error.message);
-        res.status(error.response?.status || 500).json({ error: error.message });
-    }
-});
-
-// Proxy for stops by route
-app.get('/api/routes/:routeNo', async (req, res) => {
-    try {
-        const { routeNo } = req.params;
-        console.log(`[Proxy] Fetching stops for route ${routeNo}...`);
-        const response = await axios.get(`${TRANSLINK_BASE_URL}/routes/${routeNo}`, {
-            params: { apikey: TRANSLINK_API_KEY },
-            headers: { accept: 'application/JSON' }
-        });
-        res.json(response.data);
-    } catch (error) {
-        console.error('[Proxy] Error fetching stops:', error.message);
-        res.status(error.response?.status || 500).json({ error: error.message });
-    }
-});
-
-// Proxy for GTFS-RT Trip Updates
-app.get('/api/gtfs/tripupdates', async (req, res) => {
-    try {
-        console.log('[Proxy] Fetching GTFS-RT trip updates...');
-        // Try query param first
-        const response = await axios.get(`${TRANSLINK_GTFS_URL}/TripUpdates`, {
-            params: { apikey: TRANSLINK_API_KEY },
-            responseType: 'arraybuffer'
-        });
-        res.set('Content-Type', 'application/octet-stream');
-        res.send(response.data);
-    } catch (error) {
-        console.error('[Proxy] Error fetching trip updates:', error.message);
-        res.status(error.response?.status || 500).json({ error: error.message });
-    }
-});
-
-// Proxy for GTFS-RT Vehicle Positions
-app.get('/api/gtfs/vehiclepositions', async (req, res) => {
-    try {
-        console.log('[Proxy] Fetching GTFS-RT vehicle positions...');
-
-        // Try strict query param first as per standard docs
-        const response = await axios.get(`${TRANSLINK_GTFS_URL}/VehiclePositions`, {
-            params: { apikey: TRANSLINK_API_KEY },
-            responseType: 'arraybuffer'
-        });
-
-        console.log('[Proxy] Success! Size:', response.data.length);
-        res.set('Content-Type', 'application/octet-stream');
-        res.send(response.data);
-    } catch (error) {
-        console.error('[Proxy] Error with param:', error.message);
-
-        // Retry with header?
-        try {
-            console.log('[Proxy] Retrying with Authorization header...');
-            const responseRetry = await axios.get(`${TRANSLINK_GTFS_URL}/VehiclePositions`, {
-                headers: { 'Authorization': `${TRANSLINK_API_KEY}` }, // Try raw key
-                responseType: 'arraybuffer'
-            });
-            console.log('[Proxy] Success with Header!');
-            res.set('Content-Type', 'application/octet-stream');
-            res.send(responseRetry.data);
-            return;
-        } catch (e2) {
-            console.error('[Proxy] Error with header:', e2.message);
-        }
-
-        res.status(error.response?.status || 500).json({ error: error.message });
-    }
-});
-
-// Proxy for GTFS-RT Service Alerts
-app.get('/api/gtfs/servicealerts', async (req, res) => {
-    try {
-        console.log('[Proxy] Fetching GTFS-RT service alerts...');
-        const response = await axios.get(`${TRANSLINK_GTFS_URL}/ServiceAlerts`, {
-            params: { apikey: TRANSLINK_API_KEY },
-            responseType: 'arraybuffer'
-        });
-        res.set('Content-Type', 'application/octet-stream');
-        res.send(response.data);
-    } catch (error) {
-        console.error('[Proxy] Error fetching service alerts:', error.message);
-        res.status(error.response?.status || 500).json({ error: error.message });
-    }
-});
-
-app.listen(PORT, () => {
-    console.log(`🚌 TransLink Proxy Server running on http://localhost:${PORT}`);
-    console.log(`📡 Forwarding requests to TransLink APIs`);
+    });
 });

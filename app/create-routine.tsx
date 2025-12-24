@@ -98,14 +98,15 @@ export default function CreateRoutineScreen() {
                 sequenceOrder: idx,
             }));
 
-            await RoutineService.createRoutine({
-                userId,
+            const newRoutine = {
+                userId: 'demo-user', // TODO: Replace with actual user ID from auth
                 name: name.trim(),
-                frequency,
-                daysOfWeek: frequency === 'weekly' ? daysOfWeek : undefined,
+                frequency: frequency,
+                daysOfWeek: frequency === 'weekly' ? daysOfWeek : [], // Firebase doesn't accept undefined
                 active: true,
                 segments: segmentsWithIds,
-            });
+            };
+            await RoutineService.createRoutine(newRoutine);
 
             Alert.alert('Success', 'Routine created successfully!', [
                 { text: 'OK', onPress: () => router.back() }

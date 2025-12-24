@@ -1,6 +1,8 @@
 import axios from 'axios';
 import { translinkConfig } from '../config/config';
 import { GtfsParser, ServiceAlert } from '../utils/GtfsParser';
+import { ROUTES as GTFS_ROUTES, getRouteDisplayName } from '../data/routes';
+import { STOPS as GTFS_STOPS, findNearbyStops } from '../data/stops';
 
 export interface TransitRoute {
     routeNo: string;
@@ -11,6 +13,7 @@ export interface TransitRoute {
 
 export interface TransitStop {
     stopNo: string;
+    stopId: string;  // GTFS stop_id for route lookups
     stopName: string;
     latitude: number;
     longitude: number;
@@ -48,120 +51,55 @@ class TransLinkService {
 
     /**
      * Get all available transit routes
+     * Uses real GTFS data (242 routes)
      */
     async getRoutes(): Promise<TransitRoute[]> {
-        try {
-            console.log('[TransLink] Fetching routes from TransLink REST API...');
+        console.log(`[TransLink] Returning ${GTFS_ROUTES.length} routes from GTFS data`);
 
-            const response = await axios.get(`${this.baseUrl}/routes`, {
-                params: {
-                    apikey: this.apiKey,
-                },
-                headers: {
-                    accept: 'application/JSON',
-                },
-                timeout: 10000,
-            });
-
-            // Parse response and transform to our interface
-            const routes: TransitRoute[] = [];
-
-            for (const route of response.data) {
-                // TransLink returns multiple patterns per route, take first one for simplicity
-                const pattern = route.Patterns?.[0];
-
-                routes.push({
-                    routeNo: route.RouteNo,
-                    routeName: route.Name || `Route ${route.RouteNo}`,
-                    direction: pattern?.Direction || 'UNKNOWN',
-                    destination: pattern?.Destination || route.Name,
-                });
-            }
-
-            console.log(`[TransLink] Found ${routes.length} routes`);
-            return routes;
-        } catch (error: any) {
-            console.error('[TransLink] Error fetching routes:', error.message);
-            // Return mock data for demonstration
-            console.log('[TransLink] Using mock route data for demonstration');
-            return [
-                { routeNo: '99', routeName: '99 B-Line', direction: 'EAST', destination: 'Commercial-Broadway' },
-                { routeNo: '84', routeName: '84 UBC/VCC-Clark', direction: 'WEST', destination: 'UBC' },
-                { routeNo: '3', routeName: '3 Main St', direction: 'SOUTH', destination: 'Marine Dr Station' },
-                { routeNo: '25', routeName: '25 Brentwood Station', direction: 'NORTH', destination: 'Brentwood' },
-                { routeNo: '10', routeName: '10 Hastings', direction: 'EAST', destination: 'Hastings' },
-            ];
-        }
+        return GTFS_ROUTES.map(route => ({
+            routeNo: route.shortName || route.id,
+            routeName: route.shortName ? `${route.shortName} ${route.longName}` : route.longName,
+            direction: 'BOTH', // GTFS doesn't have direction at route level
+            destination: route.longName
+        })).filter(r => r.routeNo); // Filter out routes without short names (like SkyTrain)
     }
 
     /**
      * Get stops for a specific route
+     * Uses real GTFS data (8838 stops)
+     * Note: Without stop_times.txt, we return stops geographically near the search
      */
     async getStopsForRoute(routeNo: string): Promise<TransitStop[]> {
-        try {
-            console.log(`[TransLink] Fetching stops for route ${routeNo}...`);
+        // Since we don't have route-to-stop mapping (would need stop_times.txt),
+        // return a sample of all stops for now
+        console.log(`[TransLink] Returning sample stops from ${GTFS_STOPS.length} total stops`);
 
-            // Get route info with stops
-            const response = await axios.get(`${this.baseUrl}/routes/${routeNo}`, {
-                params: {
-                    apikey: this.apiKey,
-                },
-                headers: {
-                    accept: 'application/JSON',
-                },
-                timeout: 10000,
-            });
+        // Return first 50 stops as a sample (sorted by ID for consistency)
+        return GTFS_STOPS.slice(0, 50).map(stop => ({
+            stopNo: stop.code || stop.id,
+            stopName: stop.name,
+            latitude: stop.lat,
+            longitude: stop.lon,
+            routes: [routeNo] // We don't have route-stop mapping
+        }));
+    }
 
-            const stops: TransitStop[] = [];
-            const seenStops = new Set<string>();
+    /**
+     * Get stops near a location
+     * Uses real GTFS data
+     */
+    async getNearbyStops(lat: number, lon: number, radiusKm: number = 0.5): Promise<TransitStop[]> {
+        const nearby = findNearbyStops(lat, lon, radiusKm);
+        console.log(`[TransLink] Found ${nearby.length} stops within ${radiusKm}km`);
 
-            // Parse patterns and extract unique stops
-            for (const pattern of response.data.Patterns || []) {
-                for (const stop of pattern.Stops || []) {
-                    // Avoid duplicates
-                    if (seenStops.has(stop.StopNo)) continue;
-                    seenStops.add(stop.StopNo);
-
-                    stops.push({
-                        stopNo: stop.StopNo,
-                        stopName: stop.Name,
-                        latitude: stop.Latitude,
-                        longitude: stop.Longitude,
-                        routes: [routeNo], // This stop serves at least this route
-                    });
-                }
-            }
-
-            console.log(`[TransLink] Found ${stops.length} stops for route ${routeNo}`);
-            return stops;
-        } catch (error: any) {
-            console.error('[TransLink] Error fetching stops:', error.message);
-            // Return mock stops for demonstration
-            console.log(`[TransLink] Using mock stop data for route ${routeNo}`);
-            return [
-                {
-                    stopNo: '61935',
-                    stopName: 'Broadway & Commercial',
-                    latitude: 49.2625,
-                    longitude: -123.0688,
-                    routes: [routeNo]
-                },
-                {
-                    stopNo: '50123',
-                    stopName: 'Main St & Broadway',
-                    latitude: 49.2632,
-                    longitude: -123.1005,
-                    routes: [routeNo]
-                },
-                {
-                    stopNo: '50456',
-                    stopName: 'Granville & Broadway',
-                    latitude: 49.2634,
-                    longitude: -123.1364,
-                    routes: [routeNo]
-                },
-            ];
-        }
+        return nearby.map(stop => ({
+            stopNo: stop.code || stop.id,
+            stopId: stop.id,  // Include the GTFS stop_id for route lookups
+            stopName: stop.name,
+            latitude: stop.lat,
+            longitude: stop.lon,
+            routes: [] // We now use stopRoutes.ts for this
+        }));
     }
 
     /**
@@ -172,13 +110,10 @@ class TransLinkService {
         try {
             console.log(`[TransLink] Fetching trip updates for route ${routeNo} at stop ${stopNo}...`);
 
-            // Fetch GTFS-RT protobuf data from TransLink
-            const response = await axios.get(`${this.gtfsRtUrl}/TripUpdates`, {
-                params: {
-                    apikey: this.apiKey,
-                },
+            // Fetch GTFS-RT protobuf data (no API key needed)
+            const response = await axios.get(`${this.gtfsRtUrl}/gtfsrealtime`, {
                 responseType: 'arraybuffer',
-                timeout: 10000, // 10 second timeout
+                timeout: 15000,
             });
 
             // Parse the protobuf data and filter for our route/stop
@@ -201,13 +136,10 @@ class TransLinkService {
         try {
             console.log(`[TransLink] Fetching vehicle positions for route ${routeNo}...`);
 
-            // Fetch GTFS-RT protobuf data from TransLink
-            const response = await axios.get(`${this.gtfsRtUrl}/VehiclePositions`, {
-                params: {
-                    apikey: this.apiKey,
-                },
+            // Fetch GTFS-RT protobuf data (no API key needed)
+            const response = await axios.get(`${this.gtfsRtUrl}/gtfsposition`, {
                 responseType: 'arraybuffer',
-                timeout: 10000,
+                timeout: 15000,
             });
 
             // Parse the protobuf data and filter for our route
@@ -273,10 +205,7 @@ class TransLinkService {
             console.log('[TransLink] Fetching service alerts...');
 
             // Fetch GTFS-RT protobuf data from TransLink
-            const response = await axios.get(`${this.gtfsRtUrl}/ServiceAlerts`, {
-                params: {
-                    apikey: this.apiKey,
-                },
+            const response = await axios.get(`${this.gtfsRtUrl}/gtfsalerts`, {
                 responseType: 'arraybuffer',
                 timeout: 10000,
             });
