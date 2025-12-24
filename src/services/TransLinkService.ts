@@ -2,10 +2,13 @@ import axios from 'axios';
 import { translinkConfig } from '../config/config';
 import { GtfsParser, ServiceAlert } from '../utils/GtfsParser';
 import { ROUTES as GTFS_ROUTES, getRouteDisplayName } from '../data/routes';
-import { STOPS as GTFS_STOPS, findNearbyStops } from '../data/stops';
+import { STOPS as GTFS_STOPS, findNearbyStops, getStopById } from '../data/stops';
+import { ROUTE_SHAPES, RouteShape } from '../data/routeShapes';
+import { ROUTE_STOPS } from '../data/routeStops';
 
 export interface TransitRoute {
     routeNo: string;
+    routeId: string; // GTFS route_id
     routeName: string;
     direction: string;
     destination: string;
@@ -58,6 +61,7 @@ class TransLinkService {
 
         return GTFS_ROUTES.map(route => ({
             routeNo: route.shortName || route.id,
+            routeId: route.id,
             routeName: route.shortName ? `${route.shortName} ${route.longName}` : route.longName,
             direction: 'BOTH', // GTFS doesn't have direction at route level
             destination: route.longName
@@ -66,22 +70,57 @@ class TransLinkService {
 
     /**
      * Get stops for a specific route
-     * Uses real GTFS data (8838 stops)
-     * Note: Without stop_times.txt, we return stops geographically near the search
+     * Uses real GTFS data with generated stop sequences
      */
-    async getStopsForRoute(routeNo: string): Promise<TransitStop[]> {
-        // Since we don't have route-to-stop mapping (would need stop_times.txt),
-        // return a sample of all stops for now
-        console.log(`[TransLink] Returning sample stops from ${GTFS_STOPS.length} total stops`);
+    async getStopsForRoute(routeNo: string, directionId: string = '0'): Promise<TransitStop[]> {
+        // Find route ID from route number (or use as is if it looks like an ID)
+        const route = GTFS_ROUTES.find(r => r.shortName === routeNo || r.id === routeNo);
+        if (!route) {
+            console.warn(`[TransLink] Route not found: ${routeNo}`);
+            return [];
+        }
 
-        // Return first 50 stops as a sample (sorted by ID for consistency)
-        return GTFS_STOPS.slice(0, 50).map(stop => ({
-            stopNo: stop.code || stop.id,
-            stopName: stop.name,
-            latitude: stop.lat,
-            longitude: stop.lon,
-            routes: [routeNo] // We don't have route-stop mapping
-        }));
+        const routeId = route.id;
+        console.log(`[TransLink] Getting stops for route ${routeNo} (ID: ${routeId}, Dir: ${directionId})`);
+
+        const stopIds = ROUTE_STOPS[routeId]?.[directionId];
+        if (!stopIds) {
+            console.warn(`[TransLink] No stops found for route ${routeId} dir ${directionId}`);
+            // Fallback: return sample stops if no sequence found
+            return GTFS_STOPS.slice(0, 10).map(stop => ({
+                stopNo: stop.code || stop.id,
+                stopId: stop.id,
+                stopName: stop.name,
+                latitude: stop.lat,
+                longitude: stop.lon,
+                routes: [routeNo]
+            }));
+        }
+
+        // Map stop IDs to full stop objects
+        return stopIds.map(id => {
+            const stop = getStopById(id);
+            if (!stop) return null;
+            return {
+                stopNo: stop.code || stop.id,
+                stopId: stop.id,
+                stopName: stop.name,
+                latitude: stop.lat,
+                longitude: stop.lon,
+                routes: [routeNo]
+            };
+        }).filter(s => s !== null) as TransitStop[];
+    }
+
+    /**
+     * Get shape (polyline) for a specific route
+     */
+    async getRouteShape(routeNo: string, directionId: string = '0'): Promise<RouteShape[]> {
+        const route = GTFS_ROUTES.find(r => r.shortName === routeNo || r.id === routeNo);
+        if (!route) return [];
+
+        const routeId = route.id;
+        return ROUTE_SHAPES[routeId]?.[directionId] || [];
     }
 
     /**
