@@ -1,9 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, ActivityIndicator, Text } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { View, StyleSheet, ActivityIndicator, Text, AppState, AppStateStatus } from 'react-native';
 import MapView, { Marker, Region, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
 import TransLinkService, { VehiclePosition } from '../services/TransLinkService';
+
+// Debug logging toggle
+const DEBUG_LOGGING = __DEV__;
 
 interface TransitMapProps {
     onBusPress?: (bus: VehiclePosition) => void;
@@ -15,19 +18,41 @@ export default function TransitMap({ onBusPress }: TransitMapProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
+    const appState = useRef(AppState.currentState);
+    const fetchInterval = useRef<NodeJS.Timeout | null>(null);
+
     useEffect(() => {
         getUserLocation();
+
+        // AppState listener
+        const subscription = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+            if (DEBUG_LOGGING) console.log(`[TransitMap] AppState: ${appState.current} -> ${nextState}`);
+            appState.current = nextState;
+        });
+
+        return () => {
+            subscription.remove();
+            if (fetchInterval.current) clearInterval(fetchInterval.current);
+        };
     }, []);
 
     useEffect(() => {
         if (!userLocation) return;
 
-        // Fetch buses initially
         fetchNearbyBuses();
 
-        // Refresh every 15 seconds
-        const interval = setInterval(fetchNearbyBuses, 15000);
-        return () => clearInterval(interval);
+        // Set up refresh interval (only runs when app is active)
+        fetchInterval.current = setInterval(() => {
+            if (appState.current === 'active') {
+                fetchNearbyBuses();
+            } else if (DEBUG_LOGGING) {
+                console.log('[TransitMap] Skipping fetch - app backgrounded');
+            }
+        }, 15000);
+
+        return () => {
+            if (fetchInterval.current) clearInterval(fetchInterval.current);
+        };
     }, [userLocation]);
 
     const getUserLocation = async () => {
@@ -41,16 +66,10 @@ export default function TransitMap({ onBusPress }: TransitMapProps) {
 
             const location = await Location.getCurrentPositionAsync({});
 
-            console.log('[TransitMap] Got user location:', {
-                lat: location.coords.latitude,
-                lon: location.coords.longitude
-            });
-
-            // Use ACTUAL user location
             const region: Region = {
                 latitude: location.coords.latitude,
                 longitude: location.coords.longitude,
-                latitudeDelta: 0.05, // Tighter zoom on user location
+                latitudeDelta: 0.05,
                 longitudeDelta: 0.05,
             };
 
@@ -58,7 +77,6 @@ export default function TransitMap({ onBusPress }: TransitMapProps) {
             setLoading(false);
         } catch (err: any) {
             console.error('[TransitMap] Error getting location:', err);
-            // Fallback to Vancouver if location fails
             const region: Region = {
                 latitude: 49.2827,
                 longitude: -123.1207,
@@ -72,14 +90,10 @@ export default function TransitMap({ onBusPress }: TransitMapProps) {
 
     const fetchNearbyBuses = async () => {
         try {
-            console.log('[TransitMap] Fetching nearby buses...');
-
-            // Get all vehicle positions
-            const allVehicles = await TransLinkService.getVehiclePositions('');
+            const allVehicles = await TransLinkService.getRealtimeVehiclePositions('');
 
             if (!userLocation) return;
 
-            // Calculate distance for each bus and sort by distance
             const busesWithDistance = allVehicles
                 .filter(bus => bus.latitude && bus.longitude)
                 .map(bus => ({
@@ -93,19 +107,15 @@ export default function TransitMap({ onBusPress }: TransitMapProps) {
                 }))
                 .sort((a, b) => a.distance - b.distance);
 
-            // Limit to nearest 25 buses for performance
             const nearbyBuses = busesWithDistance.slice(0, 25);
-
-            console.log(`[TransitMap] Showing ${nearbyBuses.length} nearest buses (of ${allVehicles.length} total)`);
             setBuses(nearbyBuses);
         } catch (err: any) {
             console.error('[TransitMap] Error fetching buses:', err);
         }
     };
 
-    // Haversine formula for distance calculation
     const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-        const R = 6371; // Earth radius in km
+        const R = 6371;
         const dLat = toRad(lat2 - lat1);
         const dLon = toRad(lon2 - lon1);
         const a =
@@ -146,7 +156,6 @@ export default function TransitMap({ onBusPress }: TransitMapProps) {
                 showsMyLocationButton
                 showsCompass
             >
-                {/* Bus markers */}
                 {buses.map((bus, index) => (
                     <Marker
                         key={`${bus.routeNo}-${index}`}
@@ -165,14 +174,8 @@ export default function TransitMap({ onBusPress }: TransitMapProps) {
                 ))}
             </MapView>
 
-            {/* Debug overlay */}
             <View style={styles.debugOverlay}>
-                <Text style={styles.debugText}>Buses loaded: {buses.length}</Text>
-                {buses.length > 0 && (
-                    <Text style={styles.debugText}>
-                        Routes: {buses.map(b => b.routeNo).join(', ')}
-                    </Text>
-                )}
+                <Text style={styles.debugText}>Buses: {buses.length}</Text>
             </View>
         </View>
     );

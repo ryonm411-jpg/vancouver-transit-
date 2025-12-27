@@ -88,7 +88,7 @@ function isRoutineScheduledToday(routine: Routine, currentDay: number): boolean 
 async function checkForDelays(routine: Routine, segment: any) {
     try {
         // Fetch real-time trip updates from TransLink
-        const tripUpdates = await TransLinkService.getTripUpdates(
+        const tripUpdates = await TransLinkService.getRealtimeTripUpdates(
             segment.routeNumber,
             segment.stopId
         );

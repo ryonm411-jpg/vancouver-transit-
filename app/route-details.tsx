@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import MapView, { Polyline, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
-import TransLinkService, { TransitStop } from '../src/services/TransLinkService';
+import TransLinkService, { TransitStop, VehiclePosition } from '../src/services/TransLinkService';
 import { RouteShape } from '../src/data/routeShapes';
 import RoutineService from '../src/services/RoutineService';
 import DayPickerModal from '../src/components/DayPickerModal';
@@ -18,10 +18,13 @@ export default function RouteDetailsScreen() {
 
     const [stops, setStops] = useState<TransitStop[]>([]);
     const [routeShape, setRouteShape] = useState<RouteShape[]>([]);
+    const [vehiclePositions, setVehiclePositions] = useState<VehiclePosition[]>([]);
     const [loading, setLoading] = useState(true);
     const [showDayPicker, setShowDayPicker] = useState(false);
+    const vehicleInterval = useRef<NodeJS.Timeout | null>(null);
 
     // Route params
+    const routeId = params.routeId as string;
     const routeNo = params.routeNo as string;
     const routeName = params.routeName as string;
     const userLat = params.userLat ? parseFloat(params.userLat as string) : null;
@@ -31,18 +34,20 @@ export default function RouteDetailsScreen() {
     const userId = 'demo-user'; // Placeholder
 
     useEffect(() => {
-        loadRouteData();
-    }, [routeNo]);
+        if (routeId) {
+            loadRouteData();
+        }
+    }, [routeId]);
 
     const loadRouteData = async () => {
         try {
             setLoading(true);
-            console.log(`[RouteDetails] Loading data for route ${routeNo}`);
+            console.log(`[RouteDetails] Loading data for route ID ${routeId} (Display: ${routeNo})`);
 
-            // Load stops and shape in parallel
+            // Load stops and shape in parallel (static data)
             const [fetchedStops, fetchedShape] = await Promise.all([
-                TransLinkService.getStopsForRoute(routeNo),
-                TransLinkService.getRouteShape(routeNo)
+                TransLinkService.getStaticStopsForRoute(routeId),
+                TransLinkService.getStaticRouteShape(routeId)
             ]);
 
             setStops(fetchedStops);
@@ -105,8 +110,33 @@ export default function RouteDetailsScreen() {
         setTargetStop(stop || stops[0] || null);
     }, [stops, boardingStopId]);
 
+    // Real-time vehicle tracking
+    useEffect(() => {
+        if (!routeId) return;
 
+        const fetchVehicles = async () => {
+            try {
+                const positions = await TransLinkService.getRealtimeVehiclePositions(routeId);
+                console.log(`[RouteDetails] Got ${positions.length} vehicles for route ${routeNo}`);
+                setVehiclePositions(positions);
+            } catch (error) {
+                console.error('[RouteDetails] Error fetching vehicles:', error);
+            }
+        };
 
+        // Initial fetch
+        fetchVehicles();
+
+        // Set up 10-second refresh
+        vehicleInterval.current = setInterval(fetchVehicles, 10000);
+
+        // Cleanup on unmount
+        return () => {
+            if (vehicleInterval.current) {
+                clearInterval(vehicleInterval.current);
+            }
+        };
+    }, [routeId]);
     const handleSaveRoutine = async (name: string, freq: 'daily' | 'weekly', days: number[]) => {
         // ... (Same save logic as before) ...
         try {
@@ -145,9 +175,10 @@ export default function RouteDetailsScreen() {
         router.push({
             pathname: '/active-trip',
             params: {
+                routeId,
                 routeNo,
                 routeName,
-                stopId: targetStop?.stopNo || boardingStopId || stops[0].stopNo,
+                stopId: targetStop?.stopId || boardingStopId || stops[0].stopId,
                 userLat: userLat ? String(userLat) : '',
                 userLon: userLon ? String(userLon) : ''
             }
@@ -236,10 +267,9 @@ export default function RouteDetailsScreen() {
 
                     {/* Stops Markers */}
                     {stops.map((stop, index) => {
-                        // Highlight boarding stop
                         const isBoardingStop = stop.stopId === boardingStopId;
 
-                        // Show first, last, Every 5th, AND the boarding stop
+                        // Show first, last, every 5th, AND the boarding stop
                         if (index !== 0 && index !== stops.length - 1 && index % 5 !== 0 && !isBoardingStop) return null;
 
                         return (
@@ -258,6 +288,26 @@ export default function RouteDetailsScreen() {
                             </Marker>
                         );
                     })}
+
+                    {/* Real-time Bus Markers */}
+                    {vehiclePositions.map((vehicle, index) => (
+                        <Marker
+                            key={`bus-${index}-${vehicle.timestamp}`}
+                            coordinate={{
+                                latitude: vehicle.latitude,
+                                longitude: vehicle.longitude,
+                            }}
+                            title={`Bus ${routeNo}`}
+                            description={`Speed: ${Math.round(vehicle.speed * 3.6)} km/h`}
+                            rotation={vehicle.bearing || 0}
+                            anchor={{ x: 0.5, y: 0.5 }}
+                            zIndex={20}
+                        >
+                            <View style={styles.busMarker}>
+                                <Ionicons name="bus" size={18} color="#fff" />
+                            </View>
+                        </Marker>
+                    ))}
                 </MapView>
 
                 {/* Back Button Overlay */}
@@ -531,5 +581,20 @@ const styles = StyleSheet.create({
         backgroundColor: '#007AFF', // iOS Blue
         borderWidth: 2,
         borderColor: '#fff',
+    },
+    busMarker: {
+        width: 32,
+        height: 32,
+        borderRadius: 16,
+        backgroundColor: '#0066CC',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderWidth: 2,
+        borderColor: '#fff',
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.3,
+        shadowRadius: 3,
+        elevation: 5,
     },
 });

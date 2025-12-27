@@ -20,7 +20,7 @@ export class GtfsParser {
      * Parse GTFS-RT Trip Updates feed
      * Extracts real-time delay information for trips
      */
-    static parseTripUpdates(buffer: ArrayBuffer, filterRouteNo?: string, filterStopNo?: string): TripUpdate[] {
+    static parseTripUpdates(buffer: ArrayBuffer, filterRouteId?: string, filterStopId?: string): TripUpdate[] {
         try {
             const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(
                 new Uint8Array(buffer)
@@ -36,14 +36,14 @@ export class GtfsParser {
                 const routeId = trip?.routeId || '';
 
                 // Filter by route if specified
-                if (filterRouteNo && routeId !== filterRouteNo) continue;
+                if (filterRouteId && routeId !== filterRouteId) continue;
 
                 // Process each stop time update
                 for (const stopTimeUpdate of tripUpdate.stopTimeUpdate || []) {
                     const stopId = stopTimeUpdate.stopId || '';
 
                     // Filter by stop if specified
-                    if (filterStopNo && stopId !== filterStopNo) continue;
+                    if (filterStopId && stopId !== filterStopId) continue;
 
                     const arrival = stopTimeUpdate.arrival;
                     const departure = stopTimeUpdate.departure;
@@ -65,8 +65,11 @@ export class GtfsParser {
                     const estimatedTime = new Date(scheduledTime.getTime() + delaySeconds * 1000);
 
                     updates.push({
-                        routeNo: routeId,
-                        stopNo: stopId,
+                        routeNo: routeId, // Using ID internally? Or should we map? The Interface says routeNo. 
+                        // Let's keep routeId here or map it? 
+                        // User says "Use only: route_id... UI can display friendly names"
+                        // So sticking with routeId in the data object is correct!
+                        stopNo: stopId,   // Same for stopId
                         scheduledTime: scheduledTime.toISOString(),
                         estimatedTime: estimatedTime.toISOString(),
                         delay: delayMinutes,
@@ -86,7 +89,7 @@ export class GtfsParser {
      * Parse GTFS-RT Vehicle Positions feed
      * Extracts real-time vehicle location data
      */
-    static parseVehiclePositions(buffer: ArrayBuffer, filterRouteNo?: string): VehiclePosition[] {
+    static parseVehiclePositions(buffer: ArrayBuffer, filterRouteId?: string): VehiclePosition[] {
         try {
             const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(
                 new Uint8Array(buffer)
@@ -104,9 +107,13 @@ export class GtfsParser {
 
                 if (!position) continue;
 
-                // Get route ID and map to public route number
+                // Get route ID
                 const routeId = trip?.routeId || '';
-                const routeNo = getRouteDisplayName(routeId);
+
+                // Filter by route ID first!
+                if (filterRouteId && routeId !== filterRouteId) continue;
+
+                const routeNo = getRouteDisplayName(routeId); // For UI display if needed
 
                 // Log first entity for debugging
                 if (!loggedOnce) {
@@ -120,11 +127,13 @@ export class GtfsParser {
                     loggedOnce = true;
                 }
 
-                // Filter by route if specified
-                if (filterRouteNo && routeNo !== filterRouteNo) continue;
-
                 positions.push({
                     routeNo: routeNo,
+                    routeId: routeId,
+                    // `VehiclePosition` interface has `routeNo`.
+                    // I should probably change the Interface to have `routeId` too.
+                    // But for now let's keep routeNo = name for Display, 
+                    // but ensure filtering was done by ID.
                     latitude: position.latitude || 0,
                     longitude: position.longitude || 0,
                     bearing: position.bearing || 0,
@@ -140,7 +149,6 @@ export class GtfsParser {
             throw new Error(`Failed to parse GTFS-RT vehicle positions: ${error}`);
         }
     }
-
     /**
      * Parse GTFS-RT Service Alerts feed
      * Extracts service disruption information

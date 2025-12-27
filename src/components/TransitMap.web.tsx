@@ -19,7 +19,7 @@ export default function TransitMapWeb({ onBusPress }: TransitMapProps) {
 
     const fetchBuses = async () => {
         try {
-            const allVehicles = await TransLinkService.getVehiclePositions('');
+            const allVehicles = await TransLinkService.getRealtimeVehiclePositions('');
             setBuses(allVehicles);
             setLoading(false);
         } catch (err) {

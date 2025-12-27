@@ -32,28 +32,22 @@ export default function RoutineCard({ routine, onPress, onToggle }: RoutineCardP
                 }));
 
                 try {
-                    const updates = await TransLinkService.getTripUpdates(
+                    // Use centralized arrival logic from service
+                    const eta = await TransLinkService.getArrivalsForSegment(
                         segment.routeNumber,
                         segment.stopId || ''
                     );
 
-                    if (updates && updates.length > 0) {
-                        setSegmentStatuses(prev => ({
-                            ...prev,
-                            [segment.id]: {
-                                delay: updates[0].delay,
-                                status: updates[0].status,
-                                loading: false
-                            }
-                        }));
-                    } else {
-                        setSegmentStatuses(prev => ({
-                            ...prev,
-                            [segment.id]: { delay: 0, status: 'ON_TIME', loading: false }
-                        }));
-                    }
+                    setSegmentStatuses(prev => ({
+                        ...prev,
+                        [segment.id]: {
+                            delay: eta.delay || 0,
+                            status: eta.status || 'ON_TIME',
+                            loading: false
+                        }
+                    }));
                 } catch (error) {
-                    console.error('[RoutineCard] Error fetching trip updates:', error);
+                    console.error('[RoutineCard] Error fetching arrivals:', error);
                     setSegmentStatuses(prev => ({
                         ...prev,
                         [segment.id]: { delay: 0, status: 'ON_TIME', loading: false }

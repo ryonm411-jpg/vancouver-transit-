@@ -27,7 +27,7 @@ class TripTrackingService {
      */
     static async trackVehicle(routeNo: string): Promise<VehiclePosition | null> {
         try {
-            const vehicles = await TransLinkService.getVehiclePositions(routeNo);
+            const vehicles = await TransLinkService.getRealtimeVehiclePositions(routeNo);
 
             // Return first vehicle for this route
             // In production, would match by vehicle ID

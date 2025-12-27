@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Platform, TextInput } from 'react-native';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, ActivityIndicator, Platform, TextInput, AppState, AppStateStatus } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import * as Location from 'expo-location';
@@ -8,6 +8,9 @@ import TransLinkService, { TransitRoute } from '../../src/services/TransLinkServ
 import { getRoutesForStop } from '../../src/data/stopRoutes';
 import { STOPS } from '../../src/data/stops';
 import { ROUTES } from '../../src/data/routes';
+
+// Debug logging toggle (set to false in production)
+const DEBUG_LOGGING = __DEV__;
 
 interface SearchResult {
     type: 'route' | 'stop';
@@ -19,10 +22,54 @@ interface SearchResult {
 
 interface NearbyRoute {
     route: TransitRoute;
-    nextArrival?: string;
+    stop?: any;
+    nextArrival?: string;  // Uses ETAResult.label
     delay?: number;
     distance: number;
+    source?: 'TRIP_UPDATE' | 'VEHICLE_POSITION' | 'SCHEDULE';
+    confidence?: 'HIGH' | 'MEDIUM' | 'LOW';
+    minutes?: number | null;
+    score?: number;        // Composite score (lower is better)
+    isTopPick?: boolean;   // Visual highlight for best option
+    lastUpdated?: number;  // Seconds since last update
 }
+
+// Helper to format last updated time
+const formatLastUpdated = (seconds?: number): string => {
+    if (!seconds || seconds < 30) return '';
+    if (seconds < 60) return `${seconds}s ago`;
+    return `${Math.floor(seconds / 60)}m ago`;
+};
+
+/**
+ * Calculate route score for ranking nearby routes
+ * Lower score = better option
+ * 
+ * Weights:
+ * - ETA: 40% (lower minutes = better)
+ * - Confidence: 30% (HIGH=0, MEDIUM=15, LOW=30)
+ * - Distance: 30% (walking distance to stop)
+ */
+const calculateRouteScore = (
+    minutes: number | null | undefined,
+    confidence: 'HIGH' | 'MEDIUM' | 'LOW' | undefined,
+    distanceKm: number
+): number => {
+    // ETA component (0-40 points, null = max penalty)
+    const etaScore = minutes !== null && minutes !== undefined
+        ? Math.min(40, minutes * 2)  // 0 min = 0pts, 20+ min = 40pts
+        : 40;  // Unknown ETA = max penalty
+
+    // Confidence component (0-30 points)
+    const confidenceScore = confidence === 'HIGH' ? 0 :
+        confidence === 'MEDIUM' ? 15 : 30;
+
+    // Distance component (0-30 points)
+    // 0m = 0pts, 500m = 15pts, 1km+ = 30pts
+    const distanceScore = Math.min(30, distanceKm * 30);
+
+    return etaScore + confidenceScore + distanceScore;
+};
 
 export default function HomeScreen() {
     const router = useRouter();
@@ -33,15 +80,86 @@ export default function HomeScreen() {
     const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
     const [isSearching, setIsSearching] = useState(false);
 
+    // Refs for smart refresh optimization
+    const appState = useRef(AppState.currentState);
+    const lastLocation = useRef<{ latitude: number; longitude: number } | null>(null);
+    const refreshInterval = useRef<NodeJS.Timeout | null>(null);
+    const lastFetchTime = useRef<number>(0);
+
+    // Throttle config
+    const REFRESH_INTERVAL_NORMAL = 30000;  // 30s when moving
+    const REFRESH_INTERVAL_STATIONARY = 60000;  // 60s when stationary
+    const STATIONARY_THRESHOLD = 0.05;  // km threshold to consider "moved"
+
+    // Helper: check if user has moved significantly
+    const hasMovedSignificantly = useCallback((newLoc: { latitude: number; longitude: number }) => {
+        if (!lastLocation.current) return true;
+        const dLat = Math.abs(newLoc.latitude - lastLocation.current.latitude);
+        const dLon = Math.abs(newLoc.longitude - lastLocation.current.longitude);
+        const approxDistKm = Math.sqrt(dLat * dLat + dLon * dLon) * 111;  // rough km
+        return approxDistKm > STATIONARY_THRESHOLD;
+    }, []);
+
+    // AppState listener - pause when backgrounded
+    useEffect(() => {
+        const subscription = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+            if (DEBUG_LOGGING) console.log(`[Home] AppState: ${appState.current} -> ${nextState}`);
+
+            if (appState.current.match(/inactive|background/) && nextState === 'active') {
+                // App coming to foreground - refresh immediately
+                if (DEBUG_LOGGING) console.log('[Home] App foregrounded, refreshing...');
+                fetchNearbyRoutes();
+            }
+            appState.current = nextState;
+        });
+
+        return () => subscription.remove();
+    }, []);
+
     useEffect(() => {
         initializeLocation();
     }, []);
 
     useEffect(() => {
         if (userLocation) {
-            fetchNearbyRoutes();
+            // Only fetch if it's been long enough or we moved
+            const now = Date.now();
+            const timeSinceLastFetch = now - lastFetchTime.current;
+            const moved = hasMovedSignificantly(userLocation);
+
+            // Determine refresh interval based on movement
+            const interval = moved ? REFRESH_INTERVAL_NORMAL : REFRESH_INTERVAL_STATIONARY;
+
+            // Initial fetch or moved significantly
+            if (lastFetchTime.current === 0 || (moved && timeSinceLastFetch > 5000)) {
+                fetchNearbyRoutes();
+                lastLocation.current = userLocation;
+            }
+
+            // Clear old interval and set new one
+            if (refreshInterval.current) {
+                clearInterval(refreshInterval.current);
+            }
+
+            refreshInterval.current = setInterval(() => {
+                // Only refresh if app is active
+                if (appState.current === 'active') {
+                    if (DEBUG_LOGGING) console.log('[Home] Auto-refresh (app active)');
+                    fetchNearbyRoutes();
+                } else {
+                    if (DEBUG_LOGGING) console.log('[Home] Skipping refresh (app backgrounded)');
+                }
+            }, interval);
+
+            if (DEBUG_LOGGING) console.log(`[Home] Refresh interval set to ${interval / 1000}s`);
+
+            return () => {
+                if (refreshInterval.current) {
+                    clearInterval(refreshInterval.current);
+                }
+            };
         }
-    }, [userLocation]);
+    }, [userLocation, hasMovedSignificantly]);
 
     const initializeLocation = async () => {
         try {
@@ -68,11 +186,12 @@ export default function HomeScreen() {
         if (!userLocation) return;
 
         try {
-            console.log('[Home] Fetching nearby routes...');
-            console.log(`[Home] User location: ${userLocation.latitude}, ${userLocation.longitude}`);
+            lastFetchTime.current = Date.now();
+            if (DEBUG_LOGGING) console.log('[Home] Fetching nearby routes...');
+            if (DEBUG_LOGGING) console.log(`[Home] User location: ${userLocation.latitude.toFixed(4)}, ${userLocation.longitude.toFixed(4)}`);
 
             // Step 1: Get stops within a large radius (5km) to ensure we find some
-            let nearbyStops = await TransLinkService.getNearbyStops(
+            let nearbyStops = await TransLinkService.getStaticNearbyStops(
                 userLocation.latitude,
                 userLocation.longitude,
                 5.0 // 5km radius - large enough to always find stops
@@ -100,7 +219,7 @@ export default function HomeScreen() {
             stopsWithDistance.sort((a, b) => a.distance - b.distance);
 
             // Get all routes for reference
-            const allRoutes = await TransLinkService.getRoutes();
+            const allRoutes = await TransLinkService.getStaticRoutes();
 
             // Step 3: Find routes for the closest stops using real GTFS data
             const nearby: NearbyRoute[] = [];
@@ -132,34 +251,41 @@ export default function HomeScreen() {
 
                     if (routeInfo) {
                         seenRoutes.add(routeId);
-                        // Generate realistic arrival time based on position
-                        const arrivalMinutes = Math.floor(Math.random() * 8) + 2 + (nearby.length * 3);
+
+                        // Get real arrival time from TripUpdates
+                        const eta = await TransLinkService.getArrivalsForSegment(routeId, item.stop.stopId);
+
+                        // Calculate composite score for ranking
+                        const score = calculateRouteScore(eta.minutes, eta.confidence, item.distance);
 
                         nearby.push({
                             route: routeInfo,
                             stop: item.stop,
                             distance: item.distance,
-                            delay: 0,
-                            nextArrival: `${arrivalMinutes}`,
+                            delay: eta.delay || 0,
+                            nextArrival: eta.label,
+                            source: eta.source,
+                            confidence: eta.confidence,
+                            minutes: eta.minutes,
+                            score,
+                            lastUpdated: eta.lastUpdatedSeconds,
                         });
 
-                        console.log(`[Home] Added route ${routeInfo.routeNo} (${routeInfo.routeName}) at ${Math.round(item.distance * 1000)}m`);
+                        console.log(`[Home] Route ${routeInfo.routeNo}: ${eta.label} (${eta.confidence}) score=${score.toFixed(1)}`);
                     }
                 }
             }
 
-            // Sort by nearest arrival time
-            nearby.sort((a, b) => {
-                const getMinutes = (arrival?: string) => {
-                    if (!arrival || arrival === 'Now') return 0;
-                    const num = parseInt(arrival);
-                    return isNaN(num) ? 999 : num;
-                };
-                return getMinutes(a.nextArrival) - getMinutes(b.nextArrival);
-            });
+            // Sort by composite score (lower is better)
+            nearby.sort((a, b) => (a.score ?? 999) - (b.score ?? 999));
 
-            setNearbyRoutes(nearby.slice(0, 3));
-            console.log(`[Home] Displaying ${nearby.length} nearby routes`);
+            // Mark top pick
+            if (nearby.length > 0) {
+                nearby[0].isTopPick = true;
+            }
+
+            setNearbyRoutes(nearby.slice(0, 5));  // Show top 5
+            console.log(`[Home] Displaying ${Math.min(nearby.length, 5)} nearby routes, top pick: ${nearby[0]?.route.routeNo}`);
         } catch (error) {
             console.error('[Home] Error fetching nearby routes:', error);
         }
@@ -215,6 +341,7 @@ export default function HomeScreen() {
             router.push({
                 pathname: '/route-details',
                 params: {
+                    routeId: result.data.id,
                     routeNo: result.data.shortName || result.data.id,
                     routeName: result.data.longName,
                     userLat: userLocation?.latitude ? String(userLocation.latitude) : '',
@@ -356,12 +483,14 @@ export default function HomeScreen() {
                                     key={index}
                                     style={[
                                         styles.routeCard,
-                                        { backgroundColor: getDelayColor(item.delay) }
+                                        { backgroundColor: getDelayColor(item.delay) },
+                                        item.isTopPick && styles.topPickCard
                                     ]}
                                     onPress={() => {
                                         router.push({
                                             pathname: '/route-details',
                                             params: {
+                                                routeId: item.route.routeId,
                                                 routeNo: item.route.routeNo,
                                                 routeName: item.route.routeName,
                                                 userLat: userLocation?.latitude ? String(userLocation.latitude) : '',
@@ -371,6 +500,12 @@ export default function HomeScreen() {
                                         });
                                     }}
                                 >
+                                    {/* Top Pick Badge */}
+                                    {item.isTopPick && (
+                                        <View style={styles.topPickBadge}>
+                                            <Text style={styles.topPickText}>⭐ Best Option</Text>
+                                        </View>
+                                    )}
                                     <View style={styles.routeInfo}>
                                         <Text style={styles.routeNumber}>{item.route.routeNo}</Text>
                                         <Text style={styles.routeDestination}>
@@ -381,10 +516,27 @@ export default function HomeScreen() {
                                         </Text>
                                     </View>
                                     <View style={styles.arrivalInfo}>
-                                        <Text style={styles.arrivalTime}>
+                                        <Text style={[styles.arrivalTime, item.isTopPick && styles.topPickArrival]}>
                                             {item.nextArrival || '—'}
                                         </Text>
-                                        <Text style={styles.arrivalLabel}>minutes</Text>
+                                        {/* Real-time Status Badge */}
+                                        <View style={[
+                                            styles.statusBadge,
+                                            item.source === 'TRIP_UPDATE' && styles.liveBadge,
+                                            item.source === 'VEHICLE_POSITION' && styles.gpsBadge,
+                                            item.source === 'SCHEDULE' && styles.schedBadge,
+                                        ]}>
+                                            <Text style={styles.statusBadgeText}>
+                                                {item.source === 'TRIP_UPDATE' ? '• Live' :
+                                                    item.source === 'VEHICLE_POSITION' ? 'GPS' : 'Sched'}
+                                            </Text>
+                                        </View>
+                                        {/* Last Updated (subtle) */}
+                                        {item.lastUpdated && item.lastUpdated > 30 && (
+                                            <Text style={styles.lastUpdated}>
+                                                {formatLastUpdated(item.lastUpdated)}
+                                            </Text>
+                                        )}
                                     </View>
                                 </TouchableOpacity>
                             ))}
@@ -585,5 +737,60 @@ const styles = StyleSheet.create({
         color: '#0066CC',
         fontSize: 16,
         fontWeight: '600',
+    },
+    // Top Pick Styles
+    topPickCard: {
+        borderWidth: 2,
+        borderColor: '#FFD700',
+        shadowColor: '#FFD700',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.4,
+        shadowRadius: 6,
+        elevation: 8,
+    },
+    topPickBadge: {
+        position: 'absolute',
+        top: -8,
+        left: 12,
+        backgroundColor: '#FFD700',
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 10,
+        zIndex: 1,
+    },
+    topPickText: {
+        fontSize: 11,
+        fontWeight: '700',
+        color: '#333',
+    },
+    topPickArrival: {
+        fontSize: 28,
+        fontWeight: '800',
+    },
+    // Real-time Status Badges
+    statusBadge: {
+        paddingHorizontal: 6,
+        paddingVertical: 2,
+        borderRadius: 8,
+        marginTop: 4,
+    },
+    liveBadge: {
+        backgroundColor: 'rgba(76, 175, 80, 0.9)',  // Green for live
+    },
+    gpsBadge: {
+        backgroundColor: 'rgba(255, 193, 7, 0.9)',  // Amber for GPS
+    },
+    schedBadge: {
+        backgroundColor: 'rgba(158, 158, 158, 0.7)',  // Gray for scheduled
+    },
+    statusBadgeText: {
+        fontSize: 10,
+        fontWeight: '600',
+        color: '#fff',
+    },
+    lastUpdated: {
+        fontSize: 9,
+        color: 'rgba(255,255,255,0.6)',
+        marginTop: 2,
     },
 });

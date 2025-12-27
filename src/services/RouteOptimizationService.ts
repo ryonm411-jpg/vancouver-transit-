@@ -19,7 +19,7 @@ class RouteOptimizationService {
     ): Promise<RouteSuggestion | null> {
         try {
             // 1. Get all routes
-            const allRoutes = await TransLinkService.getRoutes();
+            const allRoutes = await TransLinkService.getStaticRoutes();
 
             // 2. Filter for routes going to the same destination
             const alternatives = allRoutes.filter(
