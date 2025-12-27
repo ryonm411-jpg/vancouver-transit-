@@ -12,8 +12,12 @@ export { TransitRoute, TransitStop, TripUpdate, VehiclePosition } from '../types
 
 /**
  * Structured ETA response for consistent arrival information
+ * ETA and vehicle position are now decoupled:
+ * - ETA comes from TripUpdate (preferred) or VehiclePosition extrapolation or Schedule
+ * - Vehicle position is always fetched independently for map visualization
  */
 export interface ETAResult {
+    // ETA fields
     minutes: number | null;
     label: 'Arriving' | 'Due' | string;
     source: 'TRIP_UPDATE' | 'VEHICLE_POSITION' | 'SCHEDULE';
@@ -21,6 +25,16 @@ export interface ETAResult {
     lastUpdatedSeconds: number;
     delay?: number;
     status?: 'ON_TIME' | 'DELAYED' | 'CANCELLED';
+
+    // Vehicle visualization fields (independent of ETA source)
+    hasVehiclePosition: boolean;
+    nearestVehicle?: {
+        latitude: number;
+        longitude: number;
+        bearing: number;
+        distanceKm: number;
+        speed: number;
+    };
 }
 
 class TransLinkService {
@@ -147,91 +161,109 @@ class TransLinkService {
 
     /**
      * Get arrival status for a specific route at a stop
-     * PRIORITY ORDER:
+     * 
+     * ETA SOURCE PRIORITY:
      * 1. TripUpdate arrival.delay (most accurate) → HIGH confidence
      * 2. VehiclePosition extrapolation → MEDIUM confidence
      * 3. Static schedule fallback → LOW confidence
+     * 
+     * VEHICLE POSITION: Always fetched independently for map visualization
      */
     async getArrivalsForSegment(routeId: string, stopId: string): Promise<ETAResult> {
         const now = Date.now();
+        const stop = getStopById(stopId);
 
-        // PRIORITY 1: TripUpdate (most reliable - uses stop_time_update.arrival.delay)
-        try {
-            const updates = await this.getRealtimeTripUpdates(routeId, stopId);
-            if (updates && updates.length > 0) {
-                const update = updates[0];
-                const estimatedDate = new Date(update.estimatedTime);
-                const minutesUntil = Math.max(0, Math.round((estimatedDate.getTime() - now) / 60000));
-                const lastUpdatedSeconds = Math.round((now - estimatedDate.getTime()) / 1000);
+        // Fetch BOTH data sources in parallel for decoupled ETA + GPS visualization
+        const [tripUpdateResult, vehicleResult] = await Promise.allSettled([
+            this.getRealtimeTripUpdates(routeId, stopId),
+            this.getRealtimeVehiclePositions(routeId)
+        ]);
 
-                console.log(`[TransLink] TripUpdate found for ${routeId}@${stopId}: delay=${update.delay}m, ETA=${minutesUntil}m`);
+        // === Process VehiclePosition (for map visualization) ===
+        let hasVehiclePosition = false;
+        let nearestVehicle: ETAResult['nearestVehicle'] = undefined;
+        let vehicleBasedETA: { minutes: number; lastUpdated: number } | null = null;
 
-                return {
-                    minutes: minutesUntil,
-                    label: this.formatETALabel(minutesUntil),
-                    source: 'TRIP_UPDATE',
-                    confidence: 'HIGH',
-                    lastUpdatedSeconds: Math.abs(lastUpdatedSeconds),
-                    delay: update.delay,
-                    status: update.status
-                };
-            }
-        } catch (e) {
-            console.warn('[TransLink] TripUpdate fetch failed, trying VehiclePosition...');
-        }
+        if (vehicleResult.status === 'fulfilled' && vehicleResult.value.length > 0 && stop) {
+            const vehicles = vehicleResult.value;
 
-        // PRIORITY 2: VehiclePosition extrapolation
-        try {
-            const vehicles = await this.getRealtimeVehiclePositions(routeId);
-            console.log(`[TransLink] Got ${vehicles.length} vehicles for route ${routeId}`);
+            // Find closest vehicle to stop
+            let closestVehicle = vehicles[0];
+            let closestDist = this.haversineDistance(
+                vehicles[0].latitude, vehicles[0].longitude,
+                stop.lat, stop.lon
+            );
 
-            if (vehicles.length > 0) {
-                const stop = getStopById(stopId);
-                if (stop) {
-                    // Find closest vehicle to stop
-                    let closestVehicle = vehicles[0];
-                    let closestDist = this.haversineDistance(
-                        vehicles[0].latitude, vehicles[0].longitude,
-                        stop.lat, stop.lon
-                    );
-
-                    for (const v of vehicles) {
-                        const dist = this.haversineDistance(v.latitude, v.longitude, stop.lat, stop.lon);
-                        if (dist < closestDist) {
-                            closestDist = dist;
-                            closestVehicle = v;
-                        }
-                    }
-
-                    // Estimate arrival based on distance and speed
-                    const vehicleSpeedKmH = closestVehicle.speed > 0 ? closestVehicle.speed * 3.6 : 0;
-                    const avgSpeedKmH = vehicleSpeedKmH > 5 && vehicleSpeedKmH < 80 ? vehicleSpeedKmH : 25;
-                    const estimatedMinutes = Math.max(1, Math.round((closestDist / avgSpeedKmH) * 60));
-
-                    // Calculate how old the vehicle position is
-                    const vehicleTimestamp = closestVehicle.timestamp ? new Date(closestVehicle.timestamp).getTime() : now;
-                    const lastUpdatedSeconds = Math.round((now - vehicleTimestamp) / 1000);
-
-                    console.log(`[TransLink] VehiclePosition for ${routeId}: closest bus ${closestDist.toFixed(2)}km from stop, speed=${avgSpeedKmH.toFixed(0)}km/h, ETA=${estimatedMinutes}m`);
-
-                    return {
-                        minutes: estimatedMinutes,
-                        label: this.formatETALabel(estimatedMinutes),
-                        source: 'VEHICLE_POSITION',
-                        confidence: 'MEDIUM',
-                        lastUpdatedSeconds: Math.max(0, lastUpdatedSeconds),
-                        delay: 0,
-                        status: 'ON_TIME'
-                    };
-                } else {
-                    console.warn(`[TransLink] Stop ${stopId} not found in GTFS data`);
+            for (const v of vehicles) {
+                const dist = this.haversineDistance(v.latitude, v.longitude, stop.lat, stop.lon);
+                if (dist < closestDist) {
+                    closestDist = dist;
+                    closestVehicle = v;
                 }
             }
-        } catch (e) {
-            console.warn('[TransLink] VehiclePosition fetch failed:', e);
+
+            hasVehiclePosition = true;
+            nearestVehicle = {
+                latitude: closestVehicle.latitude,
+                longitude: closestVehicle.longitude,
+                bearing: closestVehicle.bearing || 0,
+                distanceKm: closestDist,
+                speed: closestVehicle.speed || 0
+            };
+
+            // Calculate GPS-based ETA for fallback
+            const vehicleSpeedKmH = closestVehicle.speed > 0 ? closestVehicle.speed * 3.6 : 0;
+            const avgSpeedKmH = vehicleSpeedKmH > 5 && vehicleSpeedKmH < 80 ? vehicleSpeedKmH : 25;
+            const vehicleTimestamp = closestVehicle.timestamp ? new Date(closestVehicle.timestamp).getTime() : now;
+
+            vehicleBasedETA = {
+                minutes: Math.max(1, Math.round((closestDist / avgSpeedKmH) * 60)),
+                lastUpdated: Math.round((now - vehicleTimestamp) / 1000)
+            };
+
+            console.log(`[TransLink] VehiclePosition for ${routeId}: bus ${closestDist.toFixed(2)}km from stop`);
         }
 
-        // PRIORITY 3: Static schedule fallback (no real-time data available)
+        // === Process TripUpdate (for ETA) ===
+        if (tripUpdateResult.status === 'fulfilled' && tripUpdateResult.value.length > 0) {
+            const update = tripUpdateResult.value[0];
+            const estimatedDate = new Date(update.estimatedTime);
+            const minutesUntil = Math.max(0, Math.round((estimatedDate.getTime() - now) / 60000));
+            const lastUpdatedSeconds = Math.round((now - estimatedDate.getTime()) / 1000);
+
+            console.log(`[TransLink] TripUpdate for ${routeId}@${stopId}: ETA=${minutesUntil}m, hasGPS=${hasVehiclePosition}`);
+
+            return {
+                minutes: minutesUntil,
+                label: this.formatETALabel(minutesUntil),
+                source: 'TRIP_UPDATE',
+                confidence: 'HIGH',
+                lastUpdatedSeconds: Math.abs(lastUpdatedSeconds),
+                delay: update.delay,
+                status: update.status,
+                hasVehiclePosition,
+                nearestVehicle
+            };
+        }
+
+        // === Fallback to VehiclePosition-based ETA ===
+        if (vehicleBasedETA) {
+            console.log(`[TransLink] Using VehiclePosition ETA for ${routeId}: ${vehicleBasedETA.minutes}m`);
+
+            return {
+                minutes: vehicleBasedETA.minutes,
+                label: this.formatETALabel(vehicleBasedETA.minutes),
+                source: 'VEHICLE_POSITION',
+                confidence: 'MEDIUM',
+                lastUpdatedSeconds: Math.max(0, vehicleBasedETA.lastUpdated),
+                delay: 0,
+                status: 'ON_TIME',
+                hasVehiclePosition,
+                nearestVehicle
+            };
+        }
+
+        // === Schedule fallback (no real-time data) ===
         console.log(`[TransLink] No real-time data for ${routeId}@${stopId}, using schedule fallback`);
         return {
             minutes: null,
@@ -240,7 +272,9 @@ class TransLinkService {
             confidence: 'LOW',
             lastUpdatedSeconds: 0,
             delay: 0,
-            status: 'ON_TIME'
+            status: 'ON_TIME',
+            hasVehiclePosition: false,
+            nearestVehicle: undefined
         };
     }
 

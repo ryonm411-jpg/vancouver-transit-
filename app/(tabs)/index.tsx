@@ -8,6 +8,7 @@ import TransLinkService, { TransitRoute } from '../../src/services/TransLinkServ
 import { getRoutesForStop } from '../../src/data/stopRoutes';
 import { STOPS } from '../../src/data/stops';
 import { ROUTES } from '../../src/data/routes';
+import WalkingRouteService from '../../src/services/WalkingRouteService';
 
 // Debug logging toggle (set to false in production)
 const DEBUG_LOGGING = __DEV__;
@@ -32,6 +33,14 @@ interface NearbyRoute {
     score?: number;        // Composite score (lower is better)
     isTopPick?: boolean;   // Visual highlight for best option
     lastUpdated?: number;  // Seconds since last update
+    // Decoupled GPS visualization (independent of ETA source)
+    hasVehiclePosition?: boolean;
+    nearestVehicle?: {
+        latitude: number;
+        longitude: number;
+        bearing: number;
+        distanceKm: number;
+    };
 }
 
 // Helper to format last updated time
@@ -221,59 +230,116 @@ export default function HomeScreen() {
             // Get all routes for reference
             const allRoutes = await TransLinkService.getStaticRoutes();
 
-            // Step 3: Find routes for the closest stops using real GTFS data
-            const nearby: NearbyRoute[] = [];
-            const seenRoutes = new Set<string>();  // Track which routes we've added
+            // Step 3: Build a map of routes to their candidate stops
+            // We'll collect all stops that serve each route (within the first 20 closest stops)
+            const routeToStops = new Map<string, { stop: typeof stopsWithDistance[0]['stop']; straightDist: number }[]>();
+            const routeToInfo = new Map<string, TransitRoute>();
 
-            // Check closest stops until we have 3 unique routes
-            for (const item of stopsWithDistance) {
-                if (nearby.length >= 3) break;
+            // Limit to first 20 closest stops to avoid too many lookups
+            const closestStops = stopsWithDistance.slice(0, 20);
 
-                // Get routes that serve this stop using the GTFS mapping
+            for (const item of closestStops) {
                 const routeIds = getRoutesForStop(item.stop.stopId);
-
                 if (routeIds.length === 0) continue;
 
                 console.log(`[Home] Stop ${item.stop.stopName} (${item.stop.stopId}) has routes: ${routeIds.slice(0, 5).join(', ')}${routeIds.length > 5 ? '...' : ''}`);
 
-                // For each route at this stop, add it if we haven't seen it
                 for (const routeId of routeIds) {
-                    if (nearby.length >= 3) break;
-                    if (seenRoutes.has(routeId)) continue;
+                    // Find route info if we haven't seen this route
+                    if (!routeToInfo.has(routeId)) {
+                        const info = allRoutes.find(r =>
+                            r.routeId === routeId ||
+                            r.routeNo === routeId ||
+                            routeId.includes(r.routeNo) ||
+                            r.routeNo.includes(routeId.slice(-3))
+                        );
+                        if (info) routeToInfo.set(routeId, info);
+                    }
 
-                    // Find the route info from allRoutes (matching by route_id)
-                    const routeInfo = allRoutes.find(r =>
-                        r.routeId === routeId || // Exact GTFS ID match (most reliable)
-                        r.routeNo === routeId ||
-                        routeId.includes(r.routeNo) ||
-                        r.routeNo.includes(routeId.slice(-3))  // Sometimes IDs end with route number
-                    );
-
-                    if (routeInfo) {
-                        seenRoutes.add(routeId);
-
-                        // Get real arrival time from TripUpdates
-                        const eta = await TransLinkService.getArrivalsForSegment(routeId, item.stop.stopId);
-
-                        // Calculate composite score for ranking
-                        const score = calculateRouteScore(eta.minutes, eta.confidence, item.distance);
-
-                        nearby.push({
-                            route: routeInfo,
-                            stop: item.stop,
-                            distance: item.distance,
-                            delay: eta.delay || 0,
-                            nextArrival: eta.label,
-                            source: eta.source,
-                            confidence: eta.confidence,
-                            minutes: eta.minutes,
-                            score,
-                            lastUpdated: eta.lastUpdatedSeconds,
-                        });
-
-                        console.log(`[Home] Route ${routeInfo.routeNo}: ${eta.label} (${eta.confidence}) score=${score.toFixed(1)}`);
+                    // Add this stop as a candidate for this route
+                    if (!routeToStops.has(routeId)) {
+                        routeToStops.set(routeId, []);
+                    }
+                    const candidates = routeToStops.get(routeId)!;
+                    // Only keep up to 3 candidate stops per route
+                    if (candidates.length < 3) {
+                        candidates.push({ stop: item.stop, straightDist: item.distance });
                     }
                 }
+            }
+
+            // Step 4: For each route, find the stop with shortest WALKING distance
+            const nearby: NearbyRoute[] = [];
+
+            for (const [routeId, candidates] of routeToStops.entries()) {
+                if (nearby.length >= 5) break; // Get up to 5 routes
+                const routeInfo = routeToInfo.get(routeId);
+                if (!routeInfo) continue;
+
+                // Calculate walking distance for each candidate stop
+                let bestStop = candidates[0];
+                let bestWalkingDist = Infinity;
+
+                // If only one candidate, use it directly
+                if (candidates.length === 1) {
+                    bestStop = candidates[0];
+                    bestWalkingDist = candidates[0].straightDist * 1000; // Approximate as straight line * 1000 for meters
+                } else {
+                    // Compare walking distances for multiple candidates
+                    console.log(`[Home] Route ${routeInfo.routeNo}: comparing ${candidates.length} stops...`);
+
+                    for (const candidate of candidates) {
+                        try {
+                            const walkRoute = await WalkingRouteService.getWalkingRoute(
+                                userLocation!.latitude,
+                                userLocation!.longitude,
+                                candidate.stop.latitude,
+                                candidate.stop.longitude,
+                                candidate.stop.stopId
+                            );
+                            const walkingDist = walkRoute.distanceMeters;
+                            console.log(`[Home]   - ${candidate.stop.stopName}: ${walkingDist}m walking`);
+
+                            if (walkingDist < bestWalkingDist) {
+                                bestWalkingDist = walkingDist;
+                                bestStop = candidate;
+                            }
+                        } catch (err) {
+                            // Fallback to straight-line distance if walking route fails
+                            const fallbackDist = candidate.straightDist * 1300; // Approximate walking factor
+                            if (fallbackDist < bestWalkingDist) {
+                                bestWalkingDist = fallbackDist;
+                                bestStop = candidate;
+                            }
+                        }
+                    }
+                }
+
+                console.log(`[Home] Route ${routeInfo.routeNo}: best stop is ${bestStop.stop.stopName} (${Math.round(bestWalkingDist)}m walking)`);
+
+                // Get real arrival time from TripUpdates
+                const eta = await TransLinkService.getArrivalsForSegment(routeId, bestStop.stop.stopId);
+
+                // Calculate composite score - use walking distance instead of straight-line
+                const walkingDistKm = bestWalkingDist / 1000;
+                const score = calculateRouteScore(eta.minutes, eta.confidence, walkingDistKm);
+
+                nearby.push({
+                    route: routeInfo,
+                    stop: bestStop.stop,
+                    distance: walkingDistKm, // Now this is walking distance in km
+                    delay: eta.delay || 0,
+                    nextArrival: eta.label,
+                    source: eta.source,
+                    confidence: eta.confidence,
+                    minutes: eta.minutes,
+                    score,
+                    lastUpdated: eta.lastUpdatedSeconds,
+                    hasVehiclePosition: eta.hasVehiclePosition,
+                    nearestVehicle: eta.nearestVehicle,
+                });
+
+                console.log(`[Home] Route ${routeInfo.routeNo}: ${eta.label} (${eta.source}) hasGPS=${eta.hasVehiclePosition} score=${score.toFixed(1)} at stop ${bestStop.stop.stopId} (${walkingDistKm.toFixed(2)}km walking)`);
             }
 
             // Sort by composite score (lower is better)
@@ -501,11 +567,11 @@ export default function HomeScreen() {
                                     }}
                                 >
                                     {/* Top Pick Badge */}
-                                    {item.isTopPick && (
+                                    {item.isTopPick ? (
                                         <View style={styles.topPickBadge}>
                                             <Text style={styles.topPickText}>⭐ Best Option</Text>
                                         </View>
-                                    )}
+                                    ) : null}
                                     <View style={styles.routeInfo}>
                                         <Text style={styles.routeNumber}>{item.route.routeNo}</Text>
                                         <Text style={styles.routeDestination}>
@@ -519,24 +585,39 @@ export default function HomeScreen() {
                                         <Text style={[styles.arrivalTime, item.isTopPick && styles.topPickArrival]}>
                                             {item.nextArrival || '—'}
                                         </Text>
-                                        {/* Real-time Status Badge */}
-                                        <View style={[
-                                            styles.statusBadge,
-                                            item.source === 'TRIP_UPDATE' && styles.liveBadge,
-                                            item.source === 'VEHICLE_POSITION' && styles.gpsBadge,
-                                            item.source === 'SCHEDULE' && styles.schedBadge,
-                                        ]}>
-                                            <Text style={styles.statusBadgeText}>
-                                                {item.source === 'TRIP_UPDATE' ? '• Live' :
-                                                    item.source === 'VEHICLE_POSITION' ? 'GPS' : 'Sched'}
-                                            </Text>
+                                        {/* Status Badge Row */}
+                                        <View style={styles.badgeRow}>
+                                            {/* Real-time Status Badge */}
+                                            <View style={[
+                                                styles.statusBadge,
+                                                item.source === 'TRIP_UPDATE' && styles.liveBadge,
+                                                item.source === 'VEHICLE_POSITION' && styles.gpsBadge,
+                                                item.source === 'SCHEDULE' && styles.schedBadge,
+                                            ]}>
+                                                <Text style={styles.statusBadgeText}>
+                                                    {item.source === 'TRIP_UPDATE' ? '• Live' :
+                                                        item.source === 'VEHICLE_POSITION' ? 'GPS' : 'Sched'}
+                                                </Text>
+                                            </View>
+                                            {/* GPS indicator (shows when GPS available, even if ETA is from TripUpdate) */}
+                                            {item.hasVehiclePosition && item.source === 'TRIP_UPDATE' ? (
+                                                <View style={styles.gpsIndicator}>
+                                                    <Ionicons name="locate" size={10} color="#fff" />
+                                                </View>
+                                            ) : null}
                                         </View>
+                                        {/* Bus distance from stop (if GPS available) */}
+                                        {item.hasVehiclePosition && item.nearestVehicle && item.nearestVehicle.distanceKm != null ? (
+                                            <Text style={styles.busDistance}>
+                                                🚌 {(item.nearestVehicle.distanceKm * 1000).toFixed(0)}m
+                                            </Text>
+                                        ) : null}
                                         {/* Last Updated (subtle) */}
-                                        {item.lastUpdated && item.lastUpdated > 30 && (
+                                        {item.lastUpdated && item.lastUpdated > 30 ? (
                                             <Text style={styles.lastUpdated}>
                                                 {formatLastUpdated(item.lastUpdated)}
                                             </Text>
-                                        )}
+                                        ) : null}
                                     </View>
                                 </TouchableOpacity>
                             ))}
@@ -791,6 +872,23 @@ const styles = StyleSheet.create({
     lastUpdated: {
         fontSize: 9,
         color: 'rgba(255,255,255,0.6)',
+        marginTop: 2,
+    },
+    // Decoupled GPS visualization styles
+    badgeRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        marginTop: 4,
+    },
+    gpsIndicator: {
+        backgroundColor: 'rgba(33, 150, 243, 0.9)',  // Blue for GPS indicator
+        borderRadius: 8,
+        padding: 3,
+    },
+    busDistance: {
+        fontSize: 10,
+        color: 'rgba(255,255,255,0.8)',
         marginTop: 2,
     },
 });

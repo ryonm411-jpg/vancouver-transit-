@@ -7,6 +7,7 @@ import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import TripTrackingService, { TripInstruction } from '../src/services/TripTrackingService';
 import TransLinkService, { VehiclePosition, TransitStop } from '../src/services/TransLinkService';
+import WalkingRouteService, { WalkingRoute } from '../src/services/WalkingRouteService';
 import { RouteShape } from '../src/data/routeShapes';
 
 // Debug logging toggle
@@ -59,6 +60,8 @@ export default function ActiveTripScreen() {
     const [hasBoarded, setHasBoarded] = useState(false);
     const [busDistanceToStop, setBusDistanceToStop] = useState<number | null>(null);
     const [showBoardNow, setShowBoardNow] = useState(false);
+    const [walkingRoute, setWalkingRoute] = useState<WalkingRoute | null>(null);
+    const lastWalkingRouteLocation = useRef<{ lat: number; lon: number } | null>(null);
 
     // Refs for previous state (to detect transitions for haptics)
     const prevShowBoardNow = useRef(false);
@@ -66,8 +69,24 @@ export default function ActiveTripScreen() {
 
     const locationSubscription = useRef<Location.LocationSubscription | null>(null);
     const vehicleInterval = useRef<NodeJS.Timeout | null>(null);
+    const appState = useRef(AppState.currentState);
+
+    // AppState listener - pause tracking when backgrounded
+    useEffect(() => {
+        const subscription = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+            if (DEBUG_LOGGING) console.log(`[ActiveTrip] AppState: ${appState.current} -> ${nextState}`);
+            appState.current = nextState;
+        });
+
+        return () => subscription.remove();
+    }, []);
 
     useEffect(() => {
+        // Clear walking route cache and state on fresh trip start
+        WalkingRouteService.clearCache();
+        setWalkingRoute(null);
+        lastWalkingRouteLocation.current = null;
+
         startTrip();
         return () => {
             stopTrip();
@@ -103,6 +122,52 @@ export default function ActiveTripScreen() {
         // At stop waiting for bus - don't re-zoom (freeze map)
     }, [targetStop, hasBoarded, hasReachedStop]); // Remove userLocation to prevent constant re-zooming
 
+    // Walking route fetching
+    useEffect(() => {
+        if (!userLocation || !targetStop || !stopId || hasBoarded) return;
+
+        const userLat = userLocation.coords.latitude;
+        const userLon = userLocation.coords.longitude;
+
+        // Verify targetStop has valid coordinates
+        if (!targetStop.latitude || !targetStop.longitude) {
+            console.error('[ActiveTrip] targetStop has invalid coordinates!', targetStop);
+            return;
+        }
+
+        // Check if user has moved significantly (>25m)
+        const hasMovedEnough = () => {
+            if (!lastWalkingRouteLocation.current) return true;
+            const dLat = Math.abs(userLat - lastWalkingRouteLocation.current.lat);
+            const dLon = Math.abs(userLon - lastWalkingRouteLocation.current.lon);
+            const approxDistM = Math.sqrt(dLat * dLat + dLon * dLon) * 111000;
+            return approxDistM > 25;
+        };
+
+        if (hasMovedEnough()) {
+            lastWalkingRouteLocation.current = { lat: userLat, lon: userLon };
+            console.log(`[ActiveTrip] Walking route target: stopId=${stopId}, name=${targetStop.stopName}`);
+            console.log(`[ActiveTrip] Target coordinates: (${targetStop.latitude}, ${targetStop.longitude})`);
+
+            WalkingRouteService.getWalkingRoute(
+                userLat,
+                userLon,
+                targetStop.latitude,
+                targetStop.longitude,
+                stopId
+            ).then(route => {
+                setWalkingRoute(route);
+                console.log(`[ActiveTrip] Walking route received: ${route.distanceMeters}m, ${route.coordinates.length} points`);
+                if (route.coordinates.length > 0) {
+                    const lastPoint = route.coordinates[route.coordinates.length - 1];
+                    console.log(`[ActiveTrip] Route endpoint: (${lastPoint.latitude}, ${lastPoint.longitude})`);
+                }
+            }).catch(err => {
+                console.warn('[ActiveTrip] Walking route error:', err);
+            });
+        }
+    }, [userLocation, targetStop, stopId, hasBoarded]);
+
     const startTrip = async () => {
         try {
             const { status } = await Location.requestForegroundPermissionsAsync();
@@ -123,16 +188,44 @@ export default function ActiveTripScreen() {
 
     const loadTargetStop = async () => {
         try {
-            // Fetch stops and route shape in parallel
-            const [stops, shape] = await Promise.all([
-                TransLinkService.getStaticStopsForRoute(routeId),
-                TransLinkService.getStaticRouteShape(routeId)
-            ]);
+            // Try direction 0 first
+            let stops = await TransLinkService.getStaticStopsForRoute(routeId, '0');
+            let shape = await TransLinkService.getStaticRouteShape(routeId, '0');
+
+            // Check if boarding stop is in direction 0
+            let foundStop = stops.find(s =>
+                String(s.stopNo) === String(stopId) ||
+                String(s.stopId) === String(stopId)
+            );
+
+            if (!foundStop) {
+                if (DEBUG_LOGGING) console.log(`[ActiveTrip] Stop ${stopId} not in direction 0, trying direction 1...`);
+                const dir1Stops = await TransLinkService.getStaticStopsForRoute(routeId, '1');
+                const dir1Stop = dir1Stops.find(s =>
+                    String(s.stopNo) === String(stopId) ||
+                    String(s.stopId) === String(stopId)
+                );
+
+                if (dir1Stop) {
+                    stops = dir1Stops;
+                    shape = await TransLinkService.getStaticRouteShape(routeId, '1');
+                    foundStop = dir1Stop;
+                    if (DEBUG_LOGGING) console.log(`[ActiveTrip] Using direction 1 (found stop ${stopId})`);
+                }
+            } else {
+                if (DEBUG_LOGGING) console.log(`[ActiveTrip] Using direction 0 (found stop ${stopId})`);
+            }
 
             setRouteShape(shape);
             setRouteStops(stops);
 
-            let stop = stops.find(s => s.stopNo === stopId || s.stopId === stopId);
+            // Use the stop found during direction detection
+            let stop = foundStop;
+
+            if (DEBUG_LOGGING) {
+                console.log(`[ActiveTrip] Looking for stop: ${stopId}`);
+                console.log(`[ActiveTrip] Found stop in route list: ${stop ? `${stop.stopName} (${stop.latitude}, ${stop.longitude})` : 'NOT FOUND'}`);
+            }
 
             // Manual lookup fallback
             if (!stop && stopId) {
@@ -146,7 +239,12 @@ export default function ActiveTripScreen() {
                         longitude: manualStop.lon,
                         routes: [routeNo]
                     };
+                    if (DEBUG_LOGGING) console.log(`[ActiveTrip] Using manual lookup: ${stop.stopName} (${stop.latitude}, ${stop.longitude})`);
                 }
+            }
+
+            if (!stop) {
+                console.warn(`[ActiveTrip] Stop ${stopId} not found, falling back to first stop!`);
             }
 
             setTargetStop(stop || stops[0]);
@@ -179,7 +277,14 @@ export default function ActiveTripScreen() {
 
     const startVehicleTracking = async () => {
         updateVehiclePosition();
-        vehicleInterval.current = setInterval(updateVehiclePosition, 10000);
+        vehicleInterval.current = setInterval(() => {
+            // Only fetch when app is active
+            if (appState.current === 'active') {
+                updateVehiclePosition();
+            } else if (DEBUG_LOGGING) {
+                console.log('[ActiveTrip] Skipping vehicle update - app backgrounded');
+            }
+        }, 10000);
     };
 
     const updateVehiclePosition = async () => {
@@ -393,8 +498,8 @@ export default function ActiveTripScreen() {
                     </Marker>
                 )}
 
-                {/* Bus Route Polylines - Split at boarding stop */}
-                {routeShape.length > 0 && targetStop && (() => {
+                {/* Bus Route Polyline - only show from boarding stop onwards */}
+                {routeShape.length > 0 && targetStop && routeStops.length > 0 && (() => {
                     // Find the closest point in route shape to boarding stop
                     let closestIndex = 0;
                     let closestDist = Infinity;
@@ -408,35 +513,54 @@ export default function ActiveTripScreen() {
                         }
                     }
 
-                    // Split route into before and after segments
-                    const beforePickup = routeShape.slice(0, closestIndex + 1);
-                    const afterPickup = routeShape.slice(closestIndex);
+                    // Determine route direction by finding where the boarding stop is in the stops list
+                    // Check both stopId and stopNo for reliable matching
+                    const boardingStopIndex = routeStops.findIndex(s =>
+                        String(s.stopId) === String(stopId) ||
+                        String(s.stopNo) === String(stopId)
+                    );
+                    const totalStops = routeStops.length;
+
+                    // If user is boarding near the START of the route, show from closestIndex onwards
+                    // If user is boarding near the END of the route, show from 0 to closestIndex
+                    let routeSegment;
+                    if (boardingStopIndex === -1) {
+                        // Stop not found - determine direction by distance to route endpoints
+                        const distToStart = Math.pow(routeShape[0].lat - targetStop.latitude, 2) +
+                            Math.pow(routeShape[0].lon - targetStop.longitude, 2);
+                        const distToEnd = Math.pow(routeShape[routeShape.length - 1].lat - targetStop.latitude, 2) +
+                            Math.pow(routeShape[routeShape.length - 1].lon - targetStop.longitude, 2);
+
+                        if (distToStart < distToEnd) {
+                            routeSegment = routeShape.slice(closestIndex);
+                        } else {
+                            routeSegment = routeShape.slice(0, closestIndex + 1);
+                        }
+                        if (DEBUG_LOGGING) console.log(`[ActiveTrip] Bus route: stop not in list, showing ${routeSegment.length} points`);
+                    } else if (boardingStopIndex < totalStops / 2) {
+                        // Boarding early in route - show from boarding stop to end
+                        routeSegment = routeShape.slice(closestIndex);
+                        if (DEBUG_LOGGING) console.log(`[ActiveTrip] Bus route: boarding at stop ${boardingStopIndex + 1}/${totalStops}, showing ${routeSegment.length} points`);
+                    } else {
+                        // Boarding late in route - show from start to boarding stop
+                        routeSegment = routeShape.slice(0, closestIndex + 1);
+                        if (DEBUG_LOGGING) console.log(`[ActiveTrip] Bus route: boarding at stop ${boardingStopIndex + 1}/${totalStops}, showing ${routeSegment.length} points`);
+                    }
+
+                    if (routeSegment.length < 2) return null;
 
                     return (
-                        <>
-                            {/* Before pickup - lighter and thinner */}
-                            {beforePickup.length > 1 && (
-                                <Polyline
-                                    coordinates={beforePickup.map(p => ({ latitude: p.lat, longitude: p.lon }))}
-                                    strokeColor="rgba(0, 102, 204, 0.25)"
-                                    strokeWidth={3}
-                                />
-                            )}
-                            {/* After pickup - darker and thicker */}
-                            {afterPickup.length > 1 && (
-                                <Polyline
-                                    coordinates={afterPickup.map(p => ({ latitude: p.lat, longitude: p.lon }))}
-                                    strokeColor="#0066CC"
-                                    strokeWidth={5}
-                                />
-                            )}
-                        </>
+                        <Polyline
+                            coordinates={routeSegment.map(p => ({ latitude: p.lat, longitude: p.lon }))}
+                            strokeColor="#0066CC"
+                            strokeWidth={5}
+                        />
                     );
                 })()}
 
-                {/* Walking path from user to stop (dashed) */}
+                {/* Walking path from user to stop (dashed) - uses real walking route if available */}
                 <Polyline
-                    coordinates={[
+                    coordinates={walkingRoute?.coordinates || [
                         {
                             latitude: userLocation.coords.latitude,
                             longitude: userLocation.coords.longitude,
@@ -446,8 +570,8 @@ export default function ActiveTripScreen() {
                             longitude: targetStop.longitude,
                         },
                     ]}
-                    strokeColor="#000" // Black dashed
-                    strokeWidth={3}
+                    strokeColor="#333" // Dark gray dashed
+                    strokeWidth={walkingRoute?.isActualRoute ? 4 : 3}
                     lineDashPattern={[10, 5]}
                     geodesic={true}
                 />

@@ -4,6 +4,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import MapView, { Polyline, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import TransLinkService, { TransitStop, VehiclePosition } from '../src/services/TransLinkService';
+import WalkingRouteService, { WalkingRoute } from '../src/services/WalkingRouteService';
 import { RouteShape } from '../src/data/routeShapes';
 import RoutineService from '../src/services/RoutineService';
 import DayPickerModal from '../src/components/DayPickerModal';
@@ -19,9 +20,11 @@ export default function RouteDetailsScreen() {
     const [stops, setStops] = useState<TransitStop[]>([]);
     const [routeShape, setRouteShape] = useState<RouteShape[]>([]);
     const [vehiclePositions, setVehiclePositions] = useState<VehiclePosition[]>([]);
+    const [walkingRoute, setWalkingRoute] = useState<WalkingRoute | null>(null);
     const [loading, setLoading] = useState(true);
     const [showDayPicker, setShowDayPicker] = useState(false);
     const vehicleInterval = useRef<NodeJS.Timeout | null>(null);
+    const lastUserLocation = useRef<{ lat: number; lon: number } | null>(null);
 
     // Route params
     const routeId = params.routeId as string;
@@ -44,11 +47,34 @@ export default function RouteDetailsScreen() {
             setLoading(true);
             console.log(`[RouteDetails] Loading data for route ID ${routeId} (Display: ${routeNo})`);
 
-            // Load stops and shape in parallel (static data)
-            const [fetchedStops, fetchedShape] = await Promise.all([
-                TransLinkService.getStaticStopsForRoute(routeId),
-                TransLinkService.getStaticRouteShape(routeId)
-            ]);
+            // Try direction 0 first, then direction 1 if boarding stop not found
+            let fetchedStops = await TransLinkService.getStaticStopsForRoute(routeId, '0');
+            let fetchedShape = await TransLinkService.getStaticRouteShape(routeId, '0');
+
+            // Check if boarding stop is in direction 0
+            const hasStopInDir0 = fetchedStops.some(s =>
+                String(s.stopId) === String(boardingStopId) ||
+                String(s.stopNo) === String(boardingStopId)
+            );
+
+            if (!hasStopInDir0) {
+                console.log(`[RouteDetails] Stop ${boardingStopId} not in direction 0, trying direction 1...`);
+                const dir1Stops = await TransLinkService.getStaticStopsForRoute(routeId, '1');
+                const hasStopInDir1 = dir1Stops.some(s =>
+                    String(s.stopId) === String(boardingStopId) ||
+                    String(s.stopNo) === String(boardingStopId)
+                );
+
+                if (hasStopInDir1) {
+                    fetchedStops = dir1Stops;
+                    fetchedShape = await TransLinkService.getStaticRouteShape(routeId, '1');
+                    console.log(`[RouteDetails] Using direction 1 (found stop ${boardingStopId})`);
+                } else {
+                    console.warn(`[RouteDetails] Stop ${boardingStopId} not found in either direction!`);
+                }
+            } else {
+                console.log(`[RouteDetails] Using direction 0 (found stop ${boardingStopId})`);
+            }
 
             setStops(fetchedStops);
             setRouteShape(fetchedShape);
@@ -137,6 +163,47 @@ export default function RouteDetailsScreen() {
             }
         };
     }, [routeId]);
+
+    // Walking route fetching
+    useEffect(() => {
+        console.log(`[RouteDetails] Walking route effect - userLat=${userLat}, userLon=${userLon}, targetStop=${targetStop?.stopName}, boardingStopId=${boardingStopId}`);
+
+        if (!userLat || !userLon || !targetStop || !boardingStopId) {
+            console.log('[RouteDetails] Walking route: missing required params');
+            return;
+        }
+
+        // Check if user has moved significantly (>25m)
+        const hasMovedEnough = () => {
+            if (!lastUserLocation.current) return true;
+            const dLat = Math.abs(userLat - lastUserLocation.current.lat);
+            const dLon = Math.abs(userLon - lastUserLocation.current.lon);
+            const approxDistM = Math.sqrt(dLat * dLat + dLon * dLon) * 111000; // rough meters
+            return approxDistM > 25;
+        };
+
+        if (hasMovedEnough()) {
+            lastUserLocation.current = { lat: userLat, lon: userLon };
+            console.log(`[RouteDetails] Fetching walking route to ${targetStop.stopName} (${targetStop.latitude}, ${targetStop.longitude})...`);
+
+            // Fetch walking route (non-blocking)
+            WalkingRouteService.getWalkingRoute(
+                userLat,
+                userLon,
+                targetStop.latitude,
+                targetStop.longitude,
+                boardingStopId
+            ).then(route => {
+                setWalkingRoute(route);
+                console.log(`[RouteDetails] Walking route received: ${route.distanceMeters}m, ${route.coordinates.length} points, actual=${route.isActualRoute}`);
+            }).catch(err => {
+                console.warn('[RouteDetails] Walking route error:', err);
+                // Keep previous route or null (straight line fallback in render)
+            });
+        } else {
+            console.log('[RouteDetails] Walking route: user has not moved enough');
+        }
+    }, [userLat, userLon, targetStop, boardingStopId]);
     const handleSaveRoutine = async (name: string, freq: 'daily' | 'weekly', days: number[]) => {
         // ... (Same save logic as before) ...
         try {
@@ -220,27 +287,29 @@ export default function RouteDetailsScreen() {
                         longitudeDelta: 0.1,
                     }}
                 >
-                    {/* Walking Path (Dashed Line) */}
+                    {/* Walking Path (Dashed Line) - Uses real route or straight line fallback */}
                     {(() => {
                         if (userLat && userLon && targetStop) {
-                            console.log(`[RouteDetails] Drawing walking path: (${userLat},${userLon}) -> (${targetStop.latitude},${targetStop.longitude})`);
+                            // Use walking route if available, otherwise straight line fallback
+                            const coordinates = walkingRoute?.coordinates || [
+                                { latitude: userLat, longitude: userLon },
+                                { latitude: targetStop.latitude, longitude: targetStop.longitude }
+                            ];
+
+                            console.log(`[RouteDetails] Polyline: ${coordinates.length} points, isActual=${walkingRoute?.isActualRoute ?? false}`);
+
                             return (
                                 <Polyline
-                                    coordinates={[
-                                        { latitude: userLat, longitude: userLon },
-                                        { latitude: targetStop.latitude, longitude: targetStop.longitude }
-                                    ]}
-                                    strokeColor="#000" // Black
-                                    strokeWidth={3}
-                                    lineDashPattern={[10, 5]} // Longer dashes
-                                    zIndex={100} // Ensure on top
+                                    coordinates={coordinates}
+                                    strokeColor="#333" // Dark gray
+                                    strokeWidth={walkingRoute?.isActualRoute ? 4 : 3}
+                                    lineDashPattern={[10, 5]} // Dashed
+                                    zIndex={100}
                                     geodesic={true}
                                 />
                             );
-                        } else {
-                            // console.log('[RouteDetails] Cannot draw walking path:', { userLat, userLon, targetStop: targetStop?.stopName });
-                            return null;
                         }
+                        return null;
                     })()}
 
                     {/* User Location Marker */}
@@ -256,14 +325,70 @@ export default function RouteDetailsScreen() {
                         </Marker>
                     )}
 
-                    {/* Route Polyline */}
-                    {routeShape.length > 0 && (
-                        <Polyline
-                            coordinates={routeShape.map(p => ({ latitude: p.lat, longitude: p.lon }))}
-                            strokeColor="#0066CC"
-                            strokeWidth={4}
-                        />
-                    )}
+                    {/* Route Polyline - only show from boarding stop onwards */}
+                    {routeShape.length > 0 && targetStop && stops.length > 0 && (() => {
+                        // Find the closest point in route shape to the boarding stop
+                        let closestIndex = 0;
+                        let closestDist = Infinity;
+
+                        for (let i = 0; i < routeShape.length; i++) {
+                            const dist = Math.pow(routeShape[i].lat - targetStop.latitude, 2) +
+                                Math.pow(routeShape[i].lon - targetStop.longitude, 2);
+                            if (dist < closestDist) {
+                                closestDist = dist;
+                                closestIndex = i;
+                            }
+                        }
+
+                        // Determine route direction by finding where the boarding stop is in the stops list
+                        // Check both stopId and stopNo for reliable matching
+                        console.log(`[RouteDetails] Looking for boardingStopId=${boardingStopId} in ${stops.length} stops`);
+                        if (stops.length > 0) {
+                            console.log(`[RouteDetails] First stop sample: id=${stops[0].stopId}, no=${stops[0].stopNo}`);
+                        }
+                        const boardingStopIndex = stops.findIndex(s =>
+                            String(s.stopId) === String(boardingStopId) ||
+                            String(s.stopNo) === String(boardingStopId)
+                        );
+                        console.log(`[RouteDetails] boardingStopIndex=${boardingStopIndex}`);
+                        const totalStops = stops.length;
+
+                        // If user is boarding near the START of the route, show from closestIndex onwards
+                        // If user is boarding near the END of the route, show from 0 to closestIndex
+                        let routeSegment;
+                        if (boardingStopIndex === -1) {
+                            // Stop not found - determine direction by distance to route endpoints
+                            const distToStart = Math.pow(routeShape[0].lat - targetStop.latitude, 2) +
+                                Math.pow(routeShape[0].lon - targetStop.longitude, 2);
+                            const distToEnd = Math.pow(routeShape[routeShape.length - 1].lat - targetStop.latitude, 2) +
+                                Math.pow(routeShape[routeShape.length - 1].lon - targetStop.longitude, 2);
+
+                            if (distToStart < distToEnd) {
+                                routeSegment = routeShape.slice(closestIndex);
+                            } else {
+                                routeSegment = routeShape.slice(0, closestIndex + 1);
+                            }
+                            console.log(`[RouteDetails] Bus route: stop not in list, showing ${routeSegment.length} points`);
+                        } else if (boardingStopIndex < totalStops / 2) {
+                            // Boarding early in route - show from boarding stop to end
+                            routeSegment = routeShape.slice(closestIndex);
+                            console.log(`[RouteDetails] Bus route: boarding at stop ${boardingStopIndex + 1}/${totalStops}, showing ${routeSegment.length} points`);
+                        } else {
+                            // Boarding late in route - show from start to boarding stop
+                            routeSegment = routeShape.slice(0, closestIndex + 1);
+                            console.log(`[RouteDetails] Bus route: boarding at stop ${boardingStopIndex + 1}/${totalStops}, showing ${routeSegment.length} points`);
+                        }
+
+                        if (routeSegment.length < 2) return null;
+
+                        return (
+                            <Polyline
+                                coordinates={routeSegment.map(p => ({ latitude: p.lat, longitude: p.lon }))}
+                                strokeColor="#0066CC"
+                                strokeWidth={4}
+                            />
+                        );
+                    })()}
 
                     {/* Stops Markers */}
                     {stops.map((stop, index) => {

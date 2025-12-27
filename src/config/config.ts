@@ -28,3 +28,12 @@ export const appConfig = {
     locationUpdateInterval: 60, // seconds - how often to send location updates
     transitMonitorInterval: 120, // seconds - how often to check for delays
 };
+
+// OpenRouteService Configuration (for walking directions)
+// Get a free API key at: https://openrouteservice.org/dev/#/signup
+export const openRouteServiceConfig = {
+    // Using raw base64 token format
+    apiKey: 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImFjNmM2ZmU0YmRlZjRkMGY5ZjlkOTQ4ZmNmMTQ5NjRmIiwiaCI6Im11cm11cjY0In0=',
+    baseUrl: 'https://api.openrouteservice.org',
+    movementThreshold: 25, // meters - recalculate if user moves more than this
+};
