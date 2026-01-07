@@ -228,11 +228,28 @@ class WalkingRouteService {
                 }
 
                 const walkingRoute: WalkingRoute = {
-                    coordinates,
+                    coordinates: coordinates,
                     distanceMeters: Math.round(summary.distance),
                     durationSeconds: Math.round(summary.duration),
                     isActualRoute: true
                 };
+
+                // Fix visual gaps: Prepend start and append end points if they differ significantly
+                // This connects the snapped road point to the actual user/stop location
+                if (coordinates.length > 0) {
+                    const first = coordinates[0];
+                    const last = coordinates[coordinates.length - 1];
+
+                    // Check start gap (threshold ~5 meters)
+                    if (this.calculateDistance(userLat, userLon, first.latitude, first.longitude) > 0.005) {
+                        walkingRoute.coordinates.unshift({ latitude: userLat, longitude: userLon });
+                    }
+
+                    // Check end gap
+                    if (this.calculateDistance(destLat, destLon, last.latitude, last.longitude) > 0.005) {
+                        walkingRoute.coordinates.push({ latitude: destLat, longitude: destLon });
+                    }
+                }
 
                 // Cache the result
                 this.routeCache.set(cacheKey, {
@@ -273,6 +290,78 @@ class WalkingRouteService {
      */
     getCacheStats(): { size: number } {
         return { size: this.routeCache.size };
+    }
+
+    /**
+     * Find the nearest stop by WALKING DISTANCE (not Euclidean).
+     * Pre-filters to N nearest by Euclidean, then queries ORS for actual walking distances.
+     * 
+     * @param userLat User's latitude
+     * @param userLon User's longitude
+     * @param stops Array of candidate stops with lat/lon/id
+     * @param maxCandidates Maximum stops to query ORS for (default 5)
+     * @returns The stop with shortest walking distance, or null if no stops
+     */
+    async getNearestWalkableStop<T extends { latitude: number; longitude: number; stopId: string }>(
+        userLat: number,
+        userLon: number,
+        stops: T[],
+        maxCandidates: number = 5
+    ): Promise<{ stop: T; walkingDistance: number; isActualRoute: boolean } | null> {
+        if (!stops.length) return null;
+
+        // STEP 1: Pre-filter to N nearest by Euclidean distance (fast)
+        const withEuclidean = stops.map(stop => ({
+            stop,
+            euclideanDist: this.calculateDistance(userLat, userLon, stop.latitude, stop.longitude)
+        }));
+        withEuclidean.sort((a, b) => a.euclideanDist - b.euclideanDist);
+        const candidates = withEuclidean.slice(0, maxCandidates);
+
+        console.log(`[WalkingRoute] Finding nearest walkable stop from ${stops.length} stops (checking top ${candidates.length})`);
+
+        // STEP 2: If closest is <100m, use Euclidean directly (too close to matter)
+        if (candidates[0].euclideanDist < 100) {
+            console.log(`[WalkingRoute] Closest stop <100m, using Euclidean: ${candidates[0].stop.stopId}`);
+            return {
+                stop: candidates[0].stop,
+                walkingDistance: candidates[0].euclideanDist,
+                isActualRoute: false
+            };
+        }
+
+        // STEP 3: Query ORS for walking distances in parallel
+        const walkingPromises = candidates.map(async ({ stop, euclideanDist }) => {
+            try {
+                const route = await this.getWalkingRoute(
+                    userLat, userLon,
+                    stop.latitude, stop.longitude,
+                    stop.stopId
+                );
+                return {
+                    stop,
+                    walkingDistance: route.distanceMeters,
+                    isActualRoute: route.isActualRoute
+                };
+            } catch (err) {
+                // Fallback: assume road is 1.3x straight-line distance
+                console.warn(`[WalkingRoute] ORS failed for ${stop.stopId}, using heuristic`);
+                return {
+                    stop,
+                    walkingDistance: euclideanDist * 1.3,
+                    isActualRoute: false
+                };
+            }
+        });
+
+        const results = await Promise.all(walkingPromises);
+
+        // STEP 4: Find the one with shortest walking distance
+        results.sort((a, b) => a.walkingDistance - b.walkingDistance);
+        const nearest = results[0];
+
+        console.log(`[WalkingRoute] Nearest walkable: ${nearest.stop.stopId} (${Math.round(nearest.walkingDistance)}m, actual: ${nearest.isActualRoute})`);
+        return nearest;
     }
 }
 

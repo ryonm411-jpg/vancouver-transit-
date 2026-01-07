@@ -27,6 +27,7 @@ export interface TripUpdate {
     estimatedTime: string;
     delay: number;
     status: 'ON_TIME' | 'DELAYED' | 'CANCELLED';
+    tripId?: string;
 }
 
 export interface VehiclePosition {
@@ -37,4 +38,5 @@ export interface VehiclePosition {
     bearing: number;
     speed: number;
     timestamp: string;
+    tripId?: string;
 }

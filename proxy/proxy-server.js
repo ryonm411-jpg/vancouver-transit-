@@ -3,7 +3,7 @@ const axios = require('axios');
 const cors = require('cors');
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 // TransLink GTFS-RT API
 const GTFS_RT_BASE = 'https://gtfsapi.translink.ca/v3';

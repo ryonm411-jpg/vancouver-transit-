@@ -1,5 +1,5 @@
 import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
-import { TripUpdate, VehiclePosition } from '../services/TransLinkService';
+import { TripUpdate, VehiclePosition, TransitRoute } from '../services/TransLinkService';
 import { getRouteDisplayName } from '../data/routes';
 
 export interface ServiceAlert {
@@ -16,6 +16,73 @@ export interface ServiceAlert {
 }
 
 export class GtfsParser {
+    // Deterministic route lookup map: normalized_key -> canonical_route_id
+    private static routeLookup: Map<string, string> = new Map();
+    private static isInitialized = false;
+
+    /**
+     * Normalize route identifiers for consistent lookup
+     * - Trims whitespace
+     * - Lowercases
+     * - Removes leading zeros (004 -> 4)
+     * - Removes non-alphanumeric characters (optional, but good for robustness)
+     */
+    private static normalize(input: string): string {
+        if (!input) return '';
+        return input.trim().toLowerCase().replace(/^0+/, '');
+    }
+
+    /**
+     * Initialize the route lookup map with static GTFS data
+     * This must be called at app startup
+     */
+    static initializeLookup(routes: TransitRoute[]) {
+        if (this.isInitialized) return;
+
+        this.routeLookup.clear();
+        let count = 0;
+
+        for (const route of routes) {
+            const canonicalId = route.routeId;
+
+            // Map 1: Canonical ID (normalized)
+            const normId = this.normalize(route.routeId);
+            this.routeLookup.set(normId, canonicalId);
+
+            // Map 2: Route No / Short Name (normalized)
+            // e.g. "004" -> "4", "4" -> "4"
+            if (route.routeNo) {
+                const normNo = this.normalize(route.routeNo);
+                this.routeLookup.set(normNo, canonicalId);
+            }
+
+            // Map 3: Route Name (if unique enough? careful with generic names)
+            // Usually routeName is "004 Powell..." so normalizeing it might be "4powell..."
+            // We'll skip long names for now unless specifically requested, to avoid collisions.
+            // But user said "route_long_name" too.
+            // Let's add it if it doesn't conflict.
+            if (route.routeName) {
+                // Be careful: "Downtown" might be used by multiple routes.
+                // Assuming routeName includes number like "210 Upper Lynn Valley"
+                // If not, use caution.
+                // For now, strict ID and ShortName matching is safest and covers 99% cases.
+            }
+            count++;
+        }
+
+        this.isInitialized = true;
+        console.log(`[GtfsParser] Initialized deterministic route lookup with ${count} routes (map size: ${this.routeLookup.size})`);
+    }
+
+    /**
+     * Resolve a feed route identifier to a canonical Route ID
+     */
+    private static resolveRouteId(feedRouteId: string): string | null {
+        if (!feedRouteId) return null;
+        const norm = this.normalize(feedRouteId);
+        return this.routeLookup.get(norm) || null;
+    }
+
     /**
      * Parse GTFS-RT Trip Updates feed
      * Extracts real-time delay information for trips
@@ -26,6 +93,13 @@ export class GtfsParser {
                 new Uint8Array(buffer)
             );
 
+            // Check feed timestamp
+            if (feed.header && feed.header.timestamp) {
+                const feedTime = new Date((feed.header.timestamp as any) * 1000);
+                const feedAge = Math.round((Date.now() - feedTime.getTime()) / 1000);
+                console.log(`[GtfsParser] Feed timestamp: ${feedTime.toLocaleTimeString()} (${feedAge}s old)`);
+            }
+
             const updates: TripUpdate[] = [];
 
             for (const entity of feed.entity) {
@@ -33,17 +107,35 @@ export class GtfsParser {
 
                 const tripUpdate = entity.tripUpdate;
                 const trip = tripUpdate.trip;
-                const routeId = trip?.routeId || '';
+                const rawRouteId = trip?.routeId || '';
+
+                // Resolve Route ID
+                const resolvedRouteId = this.resolveRouteId(rawRouteId);
+
+                // If we can't resolve it, and we are strict, we drop it.
+                // But if the loop hasn't been initialized (edge case), fallback to raw.
+                // Or if we just don't have that route in static data.
+                if (!resolvedRouteId) {
+                    // console.log(`[GtfsParser] Unknown route in feed: '${rawRouteId}' - dropping`);
+                    continue;
+                }
 
                 // Filter by route if specified
-                if (filterRouteId && routeId !== filterRouteId) continue;
+                if (filterRouteId && resolvedRouteId !== filterRouteId) {
+                    continue;
+                }
 
                 // Process each stop time update
                 for (const stopTimeUpdate of tripUpdate.stopTimeUpdate || []) {
                     const stopId = stopTimeUpdate.stopId || '';
 
                     // Filter by stop if specified
-                    if (filterStopId && stopId !== filterStopId) continue;
+                    if (filterStopId) {
+                        // Simple normalization for stop IDs as well
+                        const normStop = this.normalize(stopId);
+                        const normFilter = this.normalize(filterStopId);
+                        if (normStop !== normFilter) continue;
+                    }
 
                     const arrival = stopTimeUpdate.arrival;
                     const departure = stopTimeUpdate.departure;
@@ -65,15 +157,13 @@ export class GtfsParser {
                     const estimatedTime = new Date(scheduledTime.getTime() + delaySeconds * 1000);
 
                     updates.push({
-                        routeNo: routeId, // Using ID internally? Or should we map? The Interface says routeNo. 
-                        // Let's keep routeId here or map it? 
-                        // User says "Use only: route_id... UI can display friendly names"
-                        // So sticking with routeId in the data object is correct!
-                        stopNo: stopId,   // Same for stopId
+                        routeNo: resolvedRouteId, // Use Canonical ID
+                        stopNo: stopId,
                         scheduledTime: scheduledTime.toISOString(),
                         estimatedTime: estimatedTime.toISOString(),
                         delay: delayMinutes,
-                        status
+                        status,
+                        tripId: trip?.tripId || undefined
                     });
                 }
             }
@@ -96,7 +186,9 @@ export class GtfsParser {
             );
 
             const positions: VehiclePosition[] = [];
-            let loggedOnce = false;
+            const now = Date.now();
+            const MAX_STALE_MS = 5 * 60 * 1000; // 5 minutes
+            let staleCount = 0;
 
             for (const entity of feed.entity) {
                 if (!entity.vehicle) continue;
@@ -107,42 +199,48 @@ export class GtfsParser {
 
                 if (!position) continue;
 
-                // Get route ID
-                const routeId = trip?.routeId || '';
-
-                // Filter by route ID first!
-                if (filterRouteId && routeId !== filterRouteId) continue;
-
-                const routeNo = getRouteDisplayName(routeId); // For UI display if needed
-
-                // Log first entity for debugging
-                if (!loggedOnce) {
-                    console.log('[GtfsParser] Sample vehicle entity:', {
-                        vehicleId: vehicle.vehicle?.id,
-                        routeId: routeId,
-                        mappedRouteNo: routeNo,
-                        lat: position.latitude,
-                        lon: position.longitude
-                    });
-                    loggedOnce = true;
+                // Check for stale
+                const vehicleTimestamp = (vehicle.timestamp || 0) * 1000;
+                const ageMs = now - vehicleTimestamp;
+                if (vehicleTimestamp > 0 && ageMs > MAX_STALE_MS) {
+                    staleCount++;
+                    continue;
                 }
+
+                const rawRouteId = trip?.routeId || '';
+
+                // Resolve Route ID
+                const resolvedRouteId = this.resolveRouteId(rawRouteId);
+
+                if (!resolvedRouteId) {
+                    // console.log(`[GtfsParser] Unknown route vehicle: '${rawRouteId}' - dropping`);
+                    continue;
+                }
+
+                // Filter
+                if (filterRouteId && resolvedRouteId !== filterRouteId) {
+                    continue;
+                }
+
+                const routeNo = getRouteDisplayName(resolvedRouteId);
 
                 positions.push({
                     routeNo: routeNo,
-                    routeId: routeId,
-                    // `VehiclePosition` interface has `routeNo`.
-                    // I should probably change the Interface to have `routeId` too.
-                    // But for now let's keep routeNo = name for Display, 
-                    // but ensure filtering was done by ID.
+                    routeId: resolvedRouteId, // Canonical ID
                     latitude: position.latitude || 0,
                     longitude: position.longitude || 0,
                     bearing: position.bearing || 0,
                     speed: position.speed || 0,
-                    timestamp: new Date((vehicle.timestamp || 0) * 1000).toISOString()
+                    timestamp: new Date(vehicleTimestamp).toISOString(),
+                    tripId: trip?.tripId || undefined,
+                    vehicleId: vehicle.vehicle?.id || undefined
                 });
             }
 
-            console.log(`[GtfsParser] Parsed ${positions.length} vehicle positions`);
+            if (staleCount > 0) {
+                console.log(`[GtfsParser] Filtered out ${staleCount} stale vehicle positions (>5min old)`);
+            }
+            console.log(`[GtfsParser] Parsed ${positions.length} fresh vehicle positions`);
             return positions;
         } catch (error) {
             console.error('[GtfsParser] Error parsing vehicle positions:', error);

@@ -35,6 +35,13 @@ export default function RootLayout() {
                             presentation: 'modal'
                         }}
                     />
+                    <Stack.Screen
+                        name="search"
+                        options={{
+                            headerShown: false,
+                            presentation: 'modal'
+                        }}
+                    />
                 </Stack>
             </AuthProvider>
         </SafeAreaProvider>

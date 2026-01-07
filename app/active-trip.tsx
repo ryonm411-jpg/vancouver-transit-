@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, AppState, AppStateStatus } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, AppState, AppStateStatus, Dimensions, ScrollView } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -9,6 +9,7 @@ import TripTrackingService, { TripInstruction } from '../src/services/TripTracki
 import TransLinkService, { VehiclePosition, TransitStop } from '../src/services/TransLinkService';
 import WalkingRouteService, { WalkingRoute } from '../src/services/WalkingRouteService';
 import { RouteShape } from '../src/data/routeShapes';
+import { DraggableBottomSheet } from '../src/components/DraggableBottomSheet';
 
 // Debug logging toggle
 const DEBUG_LOGGING = __DEV__;
@@ -26,7 +27,9 @@ export default function ActiveTripScreen() {
     const routeId = params.routeId as string;
     const routeNo = params.routeNo as string;
     const routeName = params.routeName as string;
+
     const stopId = params.stopId as string;
+    const directionId = params.directionId as string;
 
     // Parse initial user location from params
     const initLat = params.userLat ? parseFloat(params.userLat as string) : null;
@@ -147,7 +150,6 @@ export default function ActiveTripScreen() {
         if (hasMovedEnough()) {
             lastWalkingRouteLocation.current = { lat: userLat, lon: userLon };
             console.log(`[ActiveTrip] Walking route target: stopId=${stopId}, name=${targetStop.stopName}`);
-            console.log(`[ActiveTrip] Target coordinates: (${targetStop.latitude}, ${targetStop.longitude})`);
 
             WalkingRouteService.getWalkingRoute(
                 userLat,
@@ -157,16 +159,40 @@ export default function ActiveTripScreen() {
                 stopId
             ).then(route => {
                 setWalkingRoute(route);
-                console.log(`[ActiveTrip] Walking route received: ${route.distanceMeters}m, ${route.coordinates.length} points`);
-                if (route.coordinates.length > 0) {
-                    const lastPoint = route.coordinates[route.coordinates.length - 1];
-                    console.log(`[ActiveTrip] Route endpoint: (${lastPoint.latitude}, ${lastPoint.longitude})`);
-                }
             }).catch(err => {
                 console.warn('[ActiveTrip] Walking route error:', err);
             });
         }
     }, [userLocation, targetStop, stopId, hasBoarded]);
+
+    // Ref for throttling zoom
+    const lastZoomTime = useRef<number>(0);
+
+    // Auto-zoom to User + Bus + Target
+    useEffect(() => {
+        if (!mapRef.current || !userLocation || !targetStop) return;
+
+        const now = Date.now();
+        // Only zoom if 5 seconds passed or first run
+        if (now - lastZoomTime.current < 5000 && lastZoomTime.current !== 0) return;
+
+        const coordsToFit = [
+            { latitude: userLocation.coords.latitude, longitude: userLocation.coords.longitude },
+            { latitude: targetStop.latitude, longitude: targetStop.longitude }
+        ];
+
+        if (vehiclePosition) {
+            coordsToFit.push({ latitude: vehiclePosition.latitude, longitude: vehiclePosition.longitude });
+        }
+
+        mapRef.current.fitToCoordinates(coordsToFit, {
+            edgePadding: { top: 100, right: 50, bottom: 300, left: 50 }, // Bottom padding for sheet
+            animated: true,
+        });
+
+        lastZoomTime.current = now;
+
+    }, [vehiclePosition, targetStop, userLocation]);
 
     const startTrip = async () => {
         try {
@@ -188,32 +214,51 @@ export default function ActiveTripScreen() {
 
     const loadTargetStop = async () => {
         try {
-            // Try direction 0 first
-            let stops = await TransLinkService.getStaticStopsForRoute(routeId, '0');
-            let shape = await TransLinkService.getStaticRouteShape(routeId, '0');
+            let stops: TransitStop[] = [];
+            let shape: RouteShape[] = [];
+            let foundStop: TransitStop | undefined;
 
-            // Check if boarding stop is in direction 0
-            let foundStop = stops.find(s =>
-                String(s.stopNo) === String(stopId) ||
-                String(s.stopId) === String(stopId)
-            );
+            // IF direction explicitly passed (from RouteDetails), obey it.
+            if (directionId) {
+                console.log(`[ActiveTrip] Using explicit direction ID: ${directionId}`);
+                stops = await TransLinkService.getStaticStopsForRoute(routeId, directionId);
+                shape = await TransLinkService.getStaticRouteShape(routeId, directionId);
 
-            if (!foundStop) {
-                if (DEBUG_LOGGING) console.log(`[ActiveTrip] Stop ${stopId} not in direction 0, trying direction 1...`);
-                const dir1Stops = await TransLinkService.getStaticStopsForRoute(routeId, '1');
-                const dir1Stop = dir1Stops.find(s =>
+                // Find stop in list
+                foundStop = stops.find(s =>
+                    String(s.stopNo) === String(stopId) ||
+                    String(s.stopId) === String(stopId)
+                );
+            }
+            // ELSE Auto-detect direction
+            else {
+                // Try direction 0 first
+                stops = await TransLinkService.getStaticStopsForRoute(routeId, '0');
+                shape = await TransLinkService.getStaticRouteShape(routeId, '0');
+
+                // Check if boarding stop is in direction 0
+                foundStop = stops.find(s =>
                     String(s.stopNo) === String(stopId) ||
                     String(s.stopId) === String(stopId)
                 );
 
-                if (dir1Stop) {
-                    stops = dir1Stops;
-                    shape = await TransLinkService.getStaticRouteShape(routeId, '1');
-                    foundStop = dir1Stop;
-                    if (DEBUG_LOGGING) console.log(`[ActiveTrip] Using direction 1 (found stop ${stopId})`);
+                if (!foundStop) {
+                    if (DEBUG_LOGGING) console.log(`[ActiveTrip] Stop ${stopId} not in direction 0, trying direction 1...`);
+                    const dir1Stops = await TransLinkService.getStaticStopsForRoute(routeId, '1');
+                    const dir1Stop = dir1Stops.find(s =>
+                        String(s.stopNo) === String(stopId) ||
+                        String(s.stopId) === String(stopId)
+                    );
+
+                    if (dir1Stop) {
+                        stops = dir1Stops;
+                        shape = await TransLinkService.getStaticRouteShape(routeId, '1');
+                        foundStop = dir1Stop;
+                        if (DEBUG_LOGGING) console.log(`[ActiveTrip] Using direction 1 (found stop ${stopId})`);
+                    }
+                } else {
+                    if (DEBUG_LOGGING) console.log(`[ActiveTrip] Using direction 0 (found stop ${stopId})`);
                 }
-            } else {
-                if (DEBUG_LOGGING) console.log(`[ActiveTrip] Using direction 0 (found stop ${stopId})`);
             }
 
             setRouteShape(shape);
@@ -245,6 +290,8 @@ export default function ActiveTripScreen() {
 
             if (!stop) {
                 console.warn(`[ActiveTrip] Stop ${stopId} not found, falling back to first stop!`);
+            } else {
+                console.log(`[ActiveTrip] Success: Direction found with ${stops.length} stops.`);
             }
 
             setTargetStop(stop || stops[0]);
@@ -439,6 +486,24 @@ export default function ActiveTripScreen() {
                 showsUserLocation
                 followsUserLocation={false} // Disable auto-follow so we can control zoom
             >
+                {/* DEBUG: Log all polyline rendering conditions */}
+                {(() => {
+                    console.log(`\n========== [ActiveTrip] POLYLINE RENDER STATUS ==========`);
+                    console.log(`[CONDITION CHECK]`);
+                    console.log(`  - userLocation: ${userLocation ? 'present' : 'null'}`);
+                    console.log(`  - targetStop: ${targetStop ? targetStop.stopName : 'null'}`);
+                    console.log(`  - routeShape.length: ${routeShape.length}`);
+                    console.log(`  - routeStops.length: ${routeStops.length}`);
+                    console.log(`  - vehiclePosition: ${vehiclePosition ? `(${vehiclePosition.latitude.toFixed(5)}, ${vehiclePosition.longitude.toFixed(5)})` : 'null'}`);
+                    console.log(`  - walkingRoute: ${walkingRoute ? `${walkingRoute.coordinates.length} coords` : 'null'}`);
+                    console.log(`[EXPECTED POLYLINES]`);
+                    console.log(`  - Walking path: ${walkingRoute ? '✅ SHOULD RENDER' : '❌ CONDITIONS NOT MET'}`);
+                    console.log(`  - Main route (BLUE): ${(routeShape.length > 0 && targetStop && routeStops.length > 0) ? '✅ SHOULD RENDER' : '❌ CONDITIONS NOT MET'}`);
+                    console.log(`  - Approach path (FAINT): ${(routeShape.length > 0 && targetStop && vehiclePosition) ? '✅ SHOULD RENDER' : '❌ CONDITIONS NOT MET'}`);
+                    console.log(`============================================================\n`);
+                    return null;
+                })()}
+
                 {/* Target Stop Marker (Boarding Stop - highlighted) */}
                 <Marker
                     coordinate={{
@@ -455,12 +520,14 @@ export default function ActiveTripScreen() {
                 </Marker>
 
                 {/* All Route Stops */}
+                {/* Stops Indicators - Small White Dots */}
                 {routeStops.map((stop, index) => {
-                    // Skip the target/boarding stop (already shown above)
+                    // Skip if it's the target stop (handled separately with big marker)
                     if (stop.stopId === targetStop.stopId) return null;
 
-                    // Show every 5th stop, plus first and last
-                    if (index !== 0 && index !== routeStops.length - 1 && index % 5 !== 0) return null;
+                    // Calculate if stop is passed (simple index check relative to target)
+                    // This is an approximation; ideally we check against bus position
+                    const isPassed = false; // TODO: Implement robust passed check
 
                     return (
                         <Marker
@@ -472,16 +539,17 @@ export default function ActiveTripScreen() {
                             title={stop.stopName}
                             description={`Stop #${stop.stopNo}`}
                             anchor={{ x: 0.5, y: 0.5 }}
+                            zIndex={5}
                         >
                             <View style={[
                                 styles.routeStopDot,
-                                (index === 0 || index === routeStops.length - 1) && styles.terminalStopDot
+                                isPassed && styles.passedStopDot
                             ]} />
                         </Marker>
                     );
                 })}
 
-                {/* Vehicle Marker */}
+                {/* Vehicle Marker with ETA Badge */}
                 {vehiclePosition && (
                     <Marker
                         coordinate={{
@@ -490,20 +558,33 @@ export default function ActiveTripScreen() {
                         }}
                         title={`Route ${routeNo}`}
                         rotation={vehiclePosition.bearing || 0}
+                        zIndex={100}
                     >
-                        <View style={styles.vehicleMarker}>
-                            <Ionicons name="bus" size={24} color="#fff" />
-                            <Text style={styles.vehicleNumber}>{routeNo}</Text>
+                        <View style={styles.vehicleContainer}>
+                            {eta !== null && (
+                                <View style={styles.etaBadge}>
+                                    <Text style={styles.etaText}>{eta < 1 ? '<1m' : `${eta}m`}</Text>
+                                </View>
+                            )}
+                            <View style={styles.vehicleMarker}>
+                                <Ionicons name="bus" size={20} color="#fff" />
+                            </View>
                         </View>
                     </Marker>
                 )}
 
-                {/* Bus Route Polyline - only show from boarding stop onwards */}
+                {/* User's Future Path (Boarding -> Destination) - Prominent */}
                 {routeShape.length > 0 && targetStop && routeStops.length > 0 && (() => {
-                    // Find the closest point in route shape to boarding stop
+                    console.log(`[ActiveTrip] 🛣️ MAIN ROUTE PATH (Boarding -> End):`);
+
+                    // Log the shape info
+                    console.log(`  - Route shape total points: ${routeShape.length}`);
+                    console.log(`  - Route shape start: (${routeShape[0]?.lat.toFixed(5)}, ${routeShape[0]?.lon.toFixed(5)})`);
+                    console.log(`  - Route shape end: (${routeShape[routeShape.length - 1]?.lat.toFixed(5)}, ${routeShape[routeShape.length - 1]?.lon.toFixed(5)})`);
+
+                    // Reuse logic to find start index
                     let closestIndex = 0;
                     let closestDist = Infinity;
-
                     for (let i = 0; i < routeShape.length; i++) {
                         const dist = Math.pow(routeShape[i].lat - targetStop.latitude, 2) +
                             Math.pow(routeShape[i].lon - targetStop.longitude, 2);
@@ -513,47 +594,126 @@ export default function ActiveTripScreen() {
                         }
                     }
 
-                    // Determine route direction by finding where the boarding stop is in the stops list
-                    // Check both stopId and stopNo for reliable matching
-                    const boardingStopIndex = routeStops.findIndex(s =>
-                        String(s.stopId) === String(stopId) ||
-                        String(s.stopNo) === String(stopId)
-                    );
-                    const totalStops = routeStops.length;
+                    console.log(`  - Target stop: ${targetStop.stopName} (${targetStop.latitude.toFixed(5)}, ${targetStop.longitude.toFixed(5)})`);
+                    console.log(`  - Closest shape index to stop: ${closestIndex}`);
+                    console.log(`  - Shape point at closest: (${routeShape[closestIndex]?.lat.toFixed(5)}, ${routeShape[closestIndex]?.lon.toFixed(5)})`);
 
-                    // If user is boarding near the START of the route, show from closestIndex onwards
-                    // If user is boarding near the END of the route, show from 0 to closestIndex
-                    let routeSegment;
-                    if (boardingStopIndex === -1) {
-                        // Stop not found - determine direction by distance to route endpoints
-                        const distToStart = Math.pow(routeShape[0].lat - targetStop.latitude, 2) +
-                            Math.pow(routeShape[0].lon - targetStop.longitude, 2);
-                        const distToEnd = Math.pow(routeShape[routeShape.length - 1].lat - targetStop.latitude, 2) +
-                            Math.pow(routeShape[routeShape.length - 1].lon - targetStop.longitude, 2);
+                    // Determine segment based on boarding stop
+                    // For simplicity in this demo, showing from boarding stop to end
+                    let routeSegment = routeShape.slice(closestIndex);
+                    console.log(`  - Initial segment points: ${routeSegment.length} (from ${closestIndex} to end)`);
 
-                        if (distToStart < distToEnd) {
-                            routeSegment = routeShape.slice(closestIndex);
-                        } else {
-                            routeSegment = routeShape.slice(0, closestIndex + 1);
-                        }
-                        if (DEBUG_LOGGING) console.log(`[ActiveTrip] Bus route: stop not in list, showing ${routeSegment.length} points`);
-                    } else if (boardingStopIndex < totalStops / 2) {
-                        // Boarding early in route - show from boarding stop to end
-                        routeSegment = routeShape.slice(closestIndex);
-                        if (DEBUG_LOGGING) console.log(`[ActiveTrip] Bus route: boarding at stop ${boardingStopIndex + 1}/${totalStops}, showing ${routeSegment.length} points`);
-                    } else {
-                        // Boarding late in route - show from start to boarding stop
-                        routeSegment = routeShape.slice(0, closestIndex + 1);
-                        if (DEBUG_LOGGING) console.log(`[ActiveTrip] Bus route: boarding at stop ${boardingStopIndex + 1}/${totalStops}, showing ${routeSegment.length} points`);
+                    // FALLBACK: If segment is too short (boarding stop near end), show full route
+                    if (routeSegment.length < 2) {
+                        console.log(`  ⚠️ Segment too short, using full route as fallback`);
+                        routeSegment = routeShape;
                     }
 
-                    if (routeSegment.length < 2) return null;
+                    if (routeSegment.length < 2) {
+                        console.log(`  ❌ Still too short, not rendering main route`);
+                        return null;
+                    }
+
+                    // Log bounding box
+                    const coords = routeSegment.map(p => ({ latitude: p.lat, longitude: p.lon }));
+                    const lats = coords.map(c => c.latitude);
+                    const lons = coords.map(c => c.longitude);
+                    console.log(`  - Segment start: (${coords[0].latitude.toFixed(5)}, ${coords[0].longitude.toFixed(5)})`);
+                    console.log(`  - Segment end: (${coords[coords.length - 1].latitude.toFixed(5)}, ${coords[coords.length - 1].longitude.toFixed(5)})`);
+                    console.log(`  - Bounding box: lat(${Math.min(...lats).toFixed(4)} to ${Math.max(...lats).toFixed(4)}), lon(${Math.min(...lons).toFixed(4)} to ${Math.max(...lons).toFixed(4)})`);
+
+                    console.log(`  ✅ Rendering main route polyline with ${routeSegment.length} points`);
 
                     return (
                         <Polyline
-                            coordinates={routeSegment.map(p => ({ latitude: p.lat, longitude: p.lon }))}
+                            coordinates={coords}
                             strokeColor="#0066CC"
-                            strokeWidth={5}
+                            strokeWidth={12}
+                            lineCap="round"
+                            lineJoin="round"
+                            zIndex={20}
+                        />
+                    );
+                })()}
+
+                {/* Approach Path (Bus -> Boarding) - Faint/Clear */}
+                {routeShape.length > 0 && targetStop && vehiclePosition && (() => {
+                    console.log(`[ActiveTrip] 🚌 APPROACH PATH (Bus -> Stop):`);
+                    console.log(`  - Vehicle position: (${vehiclePosition.latitude.toFixed(5)}, ${vehiclePosition.longitude.toFixed(5)})`);
+
+                    // Calculate bus distance to stop
+                    const R = 6371000;
+                    const dLat = (targetStop.latitude - vehiclePosition.latitude) * Math.PI / 180;
+                    const dLon = (targetStop.longitude - vehiclePosition.longitude) * Math.PI / 180;
+                    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                        Math.cos(vehiclePosition.latitude * Math.PI / 180) * Math.cos(targetStop.latitude * Math.PI / 180) *
+                        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+                    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                    const busDistMeters = R * c;
+
+                    console.log(`  - Bus distance to stop: ${busDistMeters.toFixed(0)}m`);
+
+                    // Find closest point in route shape to the TARGET STOP
+                    let stopShapeIndex = 0;
+                    let stopClosestDist = Infinity;
+                    for (let i = 0; i < routeShape.length; i++) {
+                        const dist = Math.pow(routeShape[i].lat - targetStop.latitude, 2) +
+                            Math.pow(routeShape[i].lon - targetStop.longitude, 2);
+                        if (dist < stopClosestDist) {
+                            stopClosestDist = dist;
+                            stopShapeIndex = i;
+                        }
+                    }
+
+                    // Find closest point in route shape to the BUS
+                    let busShapeIndex = 0;
+                    let busClosestDist = Infinity;
+                    for (let i = 0; i < routeShape.length; i++) {
+                        const dist = Math.pow(routeShape[i].lat - vehiclePosition.latitude, 2) +
+                            Math.pow(routeShape[i].lon - vehiclePosition.longitude, 2);
+                        if (dist < busClosestDist) {
+                            busClosestDist = dist;
+                            busShapeIndex = i;
+                        }
+                    }
+
+                    console.log(`  - Stop shape index: ${stopShapeIndex}`);
+                    console.log(`  - Bus shape index: ${busShapeIndex}`);
+
+                    // Handle BOTH directions - slice from bus to stop, reversing if needed
+                    let routeSegment: typeof routeShape;
+                    if (busShapeIndex <= stopShapeIndex) {
+                        routeSegment = routeShape.slice(busShapeIndex, stopShapeIndex + 1);
+                        console.log(`  - Direction: normal (bus before stop)`);
+                    } else {
+                        routeSegment = routeShape.slice(stopShapeIndex, busShapeIndex + 1).reverse();
+                        console.log(`  - Direction: reversed (bus after stop in shape)`);
+                    }
+
+                    console.log(`  - Route segment points: ${routeSegment.length}`);
+
+                    // Prepend actual bus position
+                    const segmentCoords = [
+                        { latitude: vehiclePosition.latitude, longitude: vehiclePosition.longitude },
+                        ...routeSegment.map(p => ({ latitude: p.lat, longitude: p.lon })),
+                        { latitude: targetStop.latitude, longitude: targetStop.longitude }
+                    ];
+
+                    if (segmentCoords.length < 2) {
+                        console.log(`  ❌ Segment too short, not rendering`);
+                        return null;
+                    }
+
+                    console.log(`  ✅ Rendering approach polyline with ${segmentCoords.length} coords`);
+
+                    return (
+                        <Polyline
+                            coordinates={segmentCoords}
+                            strokeColor="rgba(0, 102, 204, 0.4)"
+                            strokeWidth={6}
+                            lineCap="round"
+                            lineJoin="round"
+                            zIndex={15}
                         />
                     );
                 })()}
@@ -578,95 +738,98 @@ export default function ActiveTripScreen() {
             </MapView>
 
             {/* Trip Info Bottom Sheet */}
-            <View style={styles.bottomSheet}>
-                <View style={styles.sheetHandle} />
+            <DraggableBottomSheet
+                header={
+                    <View style={styles.sheetHeader}>
+                        <View style={styles.sheetHandle} />
 
-                {/* Route Info */}
-                <View style={styles.routeHeader}>
-                    <View style={styles.routeBadge}>
-                        <Text style={styles.routeBadgeText}>{routeNo}</Text>
-                    </View>
-                    <Text style={styles.routeNameText}>{routeName}</Text>
-                </View>
-
-                {/* Instruction */}
-                {instruction && (
-                    <View style={styles.instructionCard}>
-                        <Ionicons
-                            name={
-                                instruction.type === 'walk' ? 'walk' :
-                                    instruction.type === 'board' ? 'enter' :
-                                        instruction.type === 'onboard' ? 'checkmark-circle' :
-                                            'exit'
-                            }
-                            size={32}
-                            color="#0066CC"
-                        />
-                        <View style={styles.instructionText}>
-                            <Text style={styles.instructionMessage}>{instruction.message}</Text>
-                            {instruction.distance && (
-                                <Text style={styles.instructionDistance}>
-                                    {instruction.distance}m away
-                                </Text>
-                            )}
+                        {/* Route Info & Controls */}
+                        <View style={styles.headerTopRow}>
+                            <View style={styles.routeHeader}>
+                                <View style={styles.routeBadge}>
+                                    <Text style={styles.routeBadgeText}>{routeNo}</Text>
+                                </View>
+                                <Text style={styles.routeNameText} numberOfLines={1}>{routeName}</Text>
+                            </View>
+                            <TouchableOpacity style={styles.endTripButton} onPress={handleEndTrip}>
+                                <Text style={styles.endTripText}>End</Text>
+                            </TouchableOpacity>
                         </View>
+
+                        {/* Primary Instruction Banner */}
+                        {instruction && (
+                            <View style={[styles.instructionCard, showBoardNow && styles.boardNowCard]}>
+                                <Ionicons
+                                    name={
+                                        instruction.type === 'walk' ? 'walk' :
+                                            instruction.type === 'board' ? 'enter' :
+                                                instruction.type === 'onboard' ? 'checkmark-circle' :
+                                                    'exit'
+                                    }
+                                    size={32}
+                                    color={showBoardNow ? '#fff' : '#0066CC'}
+                                />
+                                <View style={styles.instructionText}>
+                                    <Text style={[styles.instructionMessage, showBoardNow && styles.boardNowText]}>
+                                        {instruction.message}
+                                    </Text>
+                                    {instruction.distance && (
+                                        <Text style={[styles.instructionDistance, showBoardNow && styles.boardNowText]}>
+                                            {instruction.distance}m away
+                                        </Text>
+                                    )}
+                                </View>
+                                {eta !== null && !hasBoarded && (
+                                    <View style={styles.miniEta}>
+                                        <Text style={[styles.miniEtaValue, showBoardNow && styles.boardNowText]}>{eta}</Text>
+                                        <Text style={[styles.miniEtaLabel, showBoardNow && styles.boardNowText]}>min</Text>
+                                    </View>
+                                )}
+                            </View>
+                        )}
+
+                        {/* Boarding Actions */}
+                        {hasReachedStop && !hasBoarded && (
+                            <TouchableOpacity
+                                style={styles.boardedButton}
+                                onPress={() => {
+                                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+                                    setHasBoarded(true);
+                                }}
+                            >
+                                <Ionicons name="checkmark-circle" size={24} color="#fff" />
+                                <Text style={styles.boardedButtonText}>I've Boarded</Text>
+                            </TouchableOpacity>
+                        )}
                     </View>
-                )}
+                }
+            >
+                {/* Scrollable Stops List */}
+                <ScrollView style={styles.stopsListContainer}>
+                    <Text style={styles.sectionTitle}>Stops</Text>
+                    {routeStops.map((stop, index) => {
+                        const isTarget = stop.stopId === targetStop?.stopId;
 
-                {/* ETA */}
-                {eta !== null && !hasBoarded && (
-                    <View style={styles.etaCard}>
-                        <Text style={styles.etaLabel}>Estimated Arrival</Text>
-                        <Text style={styles.etaValue}>{eta} min</Text>
-                    </View>
-                )}
-
-                {/* Bus Distance Info */}
-                {busDistanceToStop !== null && hasReachedStop && !hasBoarded && (
-                    <View style={styles.busDistanceCard}>
-                        <Ionicons name="bus" size={20} color="#0066CC" />
-                        <Text style={styles.busDistanceText}>
-                            Bus {busDistanceToStop}m away
-                        </Text>
-                    </View>
-                )}
-
-                {/* Board Now Alert */}
-                {showBoardNow && (
-                    <View style={styles.boardNowAlert}>
-                        <Ionicons name="alert-circle" size={24} color="#fff" />
-                        <Text style={styles.boardNowText}>🚌 BOARD NOW!</Text>
-                    </View>
-                )}
-
-                {/* I've Boarded Button */}
-                {hasReachedStop && !hasBoarded && (
-                    <TouchableOpacity
-                        style={styles.boardedButton}
-                        onPress={() => {
-                            console.log('[ActiveTrip] 🎫 User marked as boarded');
-                            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-                            setHasBoarded(true);
-                        }}
-                    >
-                        <Ionicons name="checkmark-circle" size={24} color="#fff" />
-                        <Text style={styles.boardedButtonText}>I've Boarded</Text>
-                    </TouchableOpacity>
-                )}
-
-                {/* On Board Status */}
-                {hasBoarded && (
-                    <View style={styles.onBoardStatus}>
-                        <Ionicons name="checkmark-circle" size={24} color="#00C853" />
-                        <Text style={styles.onBoardText}>On Board - Enjoy your ride!</Text>
-                    </View>
-                )}
-
-                {/* End Trip Button */}
-                <TouchableOpacity style={styles.endTripButton} onPress={handleEndTrip}>
-                    <Text style={styles.endTripText}>End Trip</Text>
-                </TouchableOpacity>
-            </View>
+                        return (
+                            <View key={`${stop.stopId}-${index}`} style={[styles.stopItem, isTarget && styles.targetStopItem]}>
+                                <View style={styles.stopTimeline}>
+                                    <View style={[styles.timelineLine, { opacity: index === routeStops.length - 1 ? 0 : 1 }]} />
+                                    <View style={[
+                                        styles.timelineDot,
+                                        isTarget && styles.targetTimelineDot
+                                    ]} />
+                                </View>
+                                <View style={styles.stopContent}>
+                                    <Text style={[styles.stopNameText, isTarget && styles.targetStopName]}>{stop.stopName}</Text>
+                                    <Text style={styles.stopIdText}>#{stop.stopNo} {isTarget && !hasBoarded && '• Board Here'}</Text>
+                                    {isTarget && hasBoarded && <Text style={styles.targetLabel}>My Destination</Text>}
+                                </View>
+                            </View>
+                        );
+                    })}
+                    <View style={{ height: 40 }} />
+                </ScrollView>
+            </DraggableBottomSheet>
         </View>
     );
 }
@@ -691,22 +854,64 @@ const styles = StyleSheet.create({
     stopMarker: {
         alignItems: 'center',
     },
+    vehicleContainer: {
+        alignItems: 'center',
+    },
+    etaBadge: {
+        backgroundColor: '#00BFA5',
+        paddingHorizontal: 8,
+        paddingVertical: 4,
+        borderRadius: 10,
+        marginBottom: 2,
+        borderWidth: 2,
+        borderColor: 'white',
+        shadowColor: 'black',
+        shadowOpacity: 0.3,
+        shadowOffset: { width: 0, height: 2 },
+        elevation: 4,
+        minWidth: 28,
+        alignItems: 'center',
+    },
+    etaText: {
+        color: 'white',
+        fontSize: 12,
+        fontWeight: '700',
+    },
     vehicleMarker: {
         backgroundColor: '#0066CC',
         borderRadius: 20,
-        padding: 8,
+        padding: 6,
         alignItems: 'center',
+        borderWidth: 2,
+        borderColor: 'white',
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 2 },
         shadowOpacity: 0.3,
         shadowRadius: 4,
         elevation: 5,
     },
-    vehicleNumber: {
-        color: '#fff',
-        fontSize: 10,
-        fontWeight: '700',
-        marginTop: 2,
+    routeStopDot: {
+        width: 10,
+        height: 10,
+        borderRadius: 5,
+        backgroundColor: 'white',
+        borderWidth: 1.5,
+        borderColor: '#0066CC',
+        shadowColor: 'black',
+        shadowOpacity: 0.2,
+        shadowOffset: { width: 0, height: 1 },
+        elevation: 1,
+    },
+    passedStopDot: {
+        backgroundColor: '#ccc',
+        borderColor: '#999',
+        opacity: 0.6,
+    },
+    terminalStopDot: {
+        width: 14,
+        height: 14,
+        borderRadius: 7,
+        borderWidth: 2,
     },
     bottomSheet: {
         position: 'absolute',
@@ -734,7 +939,8 @@ const styles = StyleSheet.create({
     routeHeader: {
         flexDirection: 'row',
         alignItems: 'center',
-        marginBottom: 16,
+        flex: 1,
+        marginRight: 12,
     },
     routeBadge: {
         backgroundColor: '#0066CC',
@@ -795,14 +1001,115 @@ const styles = StyleSheet.create({
     },
     endTripButton: {
         backgroundColor: '#FF6B6B',
-        borderRadius: 12,
-        padding: 16,
+        borderRadius: 8,
+        paddingHorizontal: 12,
+        paddingVertical: 8,
         alignItems: 'center',
     },
     endTripText: {
         color: '#fff',
+        fontSize: 14,
+        fontWeight: '600',
+    },
+    headerTopRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        paddingHorizontal: 16,
+        marginBottom: 12,
+    },
+    stopsListContainer: {
+        paddingHorizontal: 20,
+        paddingTop: 10,
+    },
+    sectionTitle: {
+        fontSize: 18,
+        fontWeight: '700',
+        marginBottom: 16,
+        color: '#333',
+    },
+    stopItem: {
+        flexDirection: 'row',
+        height: 60,
+    },
+    targetStopItem: {
+        height: 80,
+    },
+    stopTimeline: {
+        width: 30,
+        alignItems: 'center',
+        marginRight: 10,
+    },
+    timelineLine: {
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        width: 2,
+        backgroundColor: '#E0E0E0',
+    },
+    timelineDot: {
+        width: 10,
+        height: 10,
+        borderRadius: 5,
+        backgroundColor: '#0066CC',
+        position: 'absolute',
+        top: 25,
+        borderWidth: 2,
+        borderColor: '#fff',
+        zIndex: 1,
+    },
+    targetTimelineDot: {
+        width: 16,
+        height: 16,
+        borderRadius: 8,
+        backgroundColor: '#0066CC', // Highlight color
+        borderColor: '#fff',
+        top: 22, // Adjust for larger size
+    },
+    stopContent: {
+        flex: 1,
+        justifyContent: 'center',
+        paddingVertical: 12,
+        borderBottomWidth: 1,
+        borderBottomColor: '#f0f0f0',
+    },
+    stopNameText: {
         fontSize: 16,
         fontWeight: '600',
+        color: '#333',
+    },
+    stopIdText: {
+        fontSize: 12,
+        color: '#999',
+        marginTop: 2,
+    },
+    targetStopName: {
+        fontSize: 18, // Larger
+        fontWeight: '700',
+        color: '#000',
+    },
+    boardNowCard: {
+        backgroundColor: '#FF6B6B',
+    },
+    boardNowText: {
+        color: '#fff',
+    },
+    miniEta: {
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingLeft: 12,
+        borderLeftWidth: 1,
+        borderLeftColor: 'rgba(0,0,0,0.1)',
+        marginLeft: 8,
+    },
+    miniEtaValue: {
+        fontSize: 18,
+        fontWeight: '700',
+        color: '#0066CC',
+    },
+    miniEtaLabel: {
+        fontSize: 10,
+        color: '#666',
     },
     routeStopDot: {
         width: 10,
