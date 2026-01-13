@@ -14,10 +14,18 @@ export const firebaseConfig = {
 // TransLink API Configuration
 // REST API (api.translink.ca) is deprecated - using mock data for routes/stops
 // GTFS-RT is at gtfsapi.translink.ca (no API key needed)
+
+// Production API URL - Deployed on Render
+const PRODUCTION_API_URL = 'https://vancouver-transit.onrender.com';
+
 export const translinkConfig = {
     apiKey: "chW7YWFXZeKGiBfEJnYD", // Not used for GTFS-RT
-    baseUrl: "http://192.168.1.85:3001/api", // Proxy (for future use)
-    gtfsRtUrl: "http://192.168.1.85:3001/gtfs" // Proxy for GTFS-RT
+    baseUrl: __DEV__
+        ? "http://192.168.1.85:3001/api"
+        : `${PRODUCTION_API_URL}/api`,
+    gtfsRtUrl: __DEV__
+        ? "http://192.168.1.85:3001/gtfs"
+        : `${PRODUCTION_API_URL}/gtfs`
 };
 
 // App Configuration

@@ -23,8 +23,12 @@
         "UIBackgroundModes": [
           "location",
           "fetch",
+          "remote-notification",
+          "location",
+          "fetch",
           "remote-notification"
-        ]
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -38,7 +42,9 @@
         "ACCESS_COARSE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION",
         "RECEIVE_BOOT_COMPLETED",
-        "VIBRATE"
+        "VIBRATE",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ],
       "googleServicesFile": "./google-services.json"
     },
@@ -63,6 +69,12 @@
       "expo-asset",
       "expo-font"
     ],
-    "scheme": "vancouvertransit"
+    "scheme": "vancouvertransit",
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "b0b7b241-cfd4-468a-95f3-da91a5fedb89"
+      }
+    }
   }
 }
