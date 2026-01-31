@@ -153,7 +153,10 @@ export class GtfsParser {
                     }
 
                     // Calculate scheduled and estimated times
-                    const scheduledTime = new Date((arrival?.time || departure?.time || 0) * 1000);
+                    const arrivalTime = typeof arrival?.time === 'object' ? (arrival.time as any).low || (arrival.time as any).value : arrival?.time;
+                    const departureTime = typeof departure?.time === 'object' ? (departure.time as any).low || (departure.time as any).value : departure?.time;
+
+                    const scheduledTime = new Date((arrivalTime || departureTime || 0) * 1000);
                     const estimatedTime = new Date(scheduledTime.getTime() + delaySeconds * 1000);
 
                     updates.push({
@@ -200,7 +203,8 @@ export class GtfsParser {
                 if (!position) continue;
 
                 // Check for stale
-                const vehicleTimestamp = (vehicle.timestamp || 0) * 1000;
+                const rawTimestamp = typeof vehicle.timestamp === 'object' ? (vehicle.timestamp as any).low || (vehicle.timestamp as any).value : vehicle.timestamp;
+                const vehicleTimestamp = (rawTimestamp || 0) * 1000;
                 const ageMs = now - vehicleTimestamp;
                 if (vehicleTimestamp > 0 && ageMs > MAX_STALE_MS) {
                     staleCount++;
@@ -298,8 +302,11 @@ export class GtfsParser {
 
                 // Extract active period
                 const activePeriod = alert.activePeriod?.[0];
-                const start = activePeriod?.start ? new Date(activePeriod.start * 1000) : new Date();
-                const end = activePeriod?.end ? new Date(activePeriod.end * 1000) : undefined;
+                const startTimestamp = typeof activePeriod?.start === 'object' ? (activePeriod.start as any).low || (activePeriod.start as any).value : activePeriod?.start;
+                const endTimestamp = typeof activePeriod?.end === 'object' ? (activePeriod.end as any).low || (activePeriod.end as any).value : activePeriod?.end;
+
+                const start = startTimestamp ? new Date(startTimestamp * 1000) : new Date();
+                const end = endTimestamp ? new Date(endTimestamp * 1000) : undefined;
 
                 alerts.push({
                     id: entity.id,

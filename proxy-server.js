@@ -395,7 +395,7 @@ app.get('/api/routes/:routeNo/schedules', async (req, res) => {
 app.listen(PORT, '0.0.0.0', async () => {
     console.log('='.repeat(50));
     console.log('🚀 TransLink GTFS-RT Proxy Running (Hardened)');
-    console.log(`📍 http://192.168.1.85:${PORT}`);
+    console.log(`📍 http://192.168.1.83:${PORT}`);
     console.log('='.repeat(50));
     console.log('');
     console.log('🛡️  Hardening Features:');

@@ -8,6 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import TripTrackingService, { TripInstruction } from '../src/services/TripTrackingService';
 import TransLinkService, { VehiclePosition, TransitStop } from '../src/services/TransLinkService';
 import WalkingRouteService, { WalkingRoute } from '../src/services/WalkingRouteService';
+import NotificationService from '../src/services/NotificationService';
 import { RouteShape } from '../src/data/routeShapes';
 import { DraggableBottomSheet } from '../src/components/DraggableBottomSheet';
 
@@ -18,6 +19,12 @@ const DEBUG_LOGGING = __DEV__;
 const BUS_APPROACHING_THRESHOLD = 50;
 // Distance threshold for considering user has reached the stop (meters)
 const AT_STOP_THRESHOLD = 30;
+// Distance threshold for "arrival imminent" notification (meters)
+const ARRIVAL_NOTIFICATION_DISTANCE = 500;
+// ETA threshold for "arrival imminent" notification (minutes)
+const ARRIVAL_NOTIFICATION_ETA = 2;
+// Delay threshold for notification (minutes)
+const DELAY_NOTIFICATION_THRESHOLD = 3;
 
 export default function ActiveTripScreen() {
     const params = useLocalSearchParams();
@@ -64,11 +71,17 @@ export default function ActiveTripScreen() {
     const [busDistanceToStop, setBusDistanceToStop] = useState<number | null>(null);
     const [showBoardNow, setShowBoardNow] = useState(false);
     const [walkingRoute, setWalkingRoute] = useState<WalkingRoute | null>(null);
+    const [scheduledTimes, setScheduledTimes] = useState<string[]>([]); // Horizontal schedule display
     const lastWalkingRouteLocation = useRef<{ lat: number; lon: number } | null>(null);
 
     // Refs for previous state (to detect transitions for haptics)
     const prevShowBoardNow = useRef(false);
     const prevHasReachedStop = useRef(false);
+
+    // Notification tracking state
+    const [arrivalNotified, setArrivalNotified] = useState(false);
+    const [delayNotified, setDelayNotified] = useState<number | null>(null);
+    const [originalScheduledTime, setOriginalScheduledTime] = useState<Date | null>(null);
 
     const locationSubscription = useRef<Location.LocationSubscription | null>(null);
     const vehicleInterval = useRef<NodeJS.Timeout | null>(null);
@@ -82,6 +95,11 @@ export default function ActiveTripScreen() {
         });
 
         return () => subscription.remove();
+    }, []);
+
+    // Request notification permissions on mount
+    useEffect(() => {
+        NotificationService.requestPermissions();
     }, []);
 
     useEffect(() => {
@@ -295,6 +313,28 @@ export default function ActiveTripScreen() {
             }
 
             setTargetStop(stop || stops[0]);
+
+            // Fetch scheduled times for horizontal display
+            if (stop) {
+                try {
+                    const estimates = await TransLinkService.getStopEstimates(stop.stopNo, routeNo);
+                    const times = estimates.map(e => {
+                        const date = new Date(e.estimatedTime || e.scheduledTime);
+                        return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+                    }).slice(0, 10); // Limit to 10 times
+                    setScheduledTimes(times);
+                    console.log(`[ActiveTrip] Fetched ${times.length} scheduled times`);
+
+                    // Capture first scheduled time for delay comparison
+                    if (estimates.length > 0) {
+                        const firstScheduledTime = new Date(estimates[0].scheduledTime);
+                        setOriginalScheduledTime(firstScheduledTime);
+                        console.log(`[ActiveTrip] Original scheduled time: ${firstScheduledTime.toLocaleTimeString()}`);
+                    }
+                } catch (schedErr) {
+                    console.warn('[ActiveTrip] Failed to fetch schedule:', schedErr);
+                }
+            }
         } catch (error) {
             console.error('[ActiveTrip] Error loading stop:', error);
         }
@@ -371,6 +411,40 @@ export default function ActiveTripScreen() {
                     // Trigger haptic feedback when transitioning to "Board now"
                     console.log('[ActiveTrip] 🚌 Bus approaching! Triggering haptic feedback');
                     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                }
+
+                // ARRIVAL IMMINENT NOTIFICATION
+                // Trigger when bus is <=500m OR ETA<=2min (whichever first), user at stop, not boarded, not already notified
+                const vehicleSpeed = (closestBus.speed || 30) / 3.6; // m/s
+                const etaMinutes = Math.ceil(distMeters / vehicleSpeed / 60);
+
+                if (!arrivalNotified && hasReachedStop && !hasBoarded) {
+                    if (distMeters <= ARRIVAL_NOTIFICATION_DISTANCE || etaMinutes <= ARRIVAL_NOTIFICATION_ETA) {
+                        console.log(`[ActiveTrip] 🔔 Sending arrival notification: ${etaMinutes}min, ${distMeters.toFixed(0)}m`);
+                        NotificationService.sendArrivalImminent(routeNo, etaMinutes);
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+                        setArrivalNotified(true);
+                    }
+                }
+
+                // DELAY NOTIFICATION
+                // Compare estimated arrival to original scheduled time (3+ min delay)
+                if (originalScheduledTime && !hasBoarded) {
+                    const now = Date.now();
+                    const currentEstimatedArrival = new Date(now + etaMinutes * 60 * 1000);
+                    const delayMs = currentEstimatedArrival.getTime() - originalScheduledTime.getTime();
+                    const delayMinutes = Math.round(delayMs / 60000);
+
+                    if (delayMinutes >= DELAY_NOTIFICATION_THRESHOLD && delayNotified !== delayMinutes) {
+                        console.log(`[ActiveTrip] 🔔 Sending delay notification: ${delayMinutes}min delay`);
+                        NotificationService.sendDelayNotification(
+                            routeNo,
+                            delayMinutes,
+                            originalScheduledTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+                            currentEstimatedArrival.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+                        );
+                        setDelayNotified(delayMinutes);
+                    }
                 }
 
                 prevShowBoardNow.current = isBoardNow;
@@ -573,8 +647,8 @@ export default function ActiveTripScreen() {
                     </Marker>
                 )}
 
-                {/* User's Future Path (Boarding -> Destination) - Prominent */}
-                {routeShape.length > 0 && targetStop && routeStops.length > 0 && (() => {
+                {/* User's Future Path (Boarding -> Destination) - Only show AFTER boarding */}
+                {hasBoarded && routeShape.length > 0 && targetStop && routeStops.length > 0 && (() => {
                     console.log(`[ActiveTrip] 🛣️ MAIN ROUTE PATH (Boarding -> End):`);
 
                     // Log the shape info
@@ -709,11 +783,11 @@ export default function ActiveTripScreen() {
                     return (
                         <Polyline
                             coordinates={segmentCoords}
-                            strokeColor="rgba(0, 102, 204, 0.4)"
-                            strokeWidth={6}
+                            strokeColor="#0066CC"
+                            strokeWidth={8}
                             lineCap="round"
                             lineJoin="round"
-                            zIndex={15}
+                            zIndex={20}
                         />
                     );
                 })()}
@@ -730,17 +804,19 @@ export default function ActiveTripScreen() {
                             longitude: targetStop.longitude,
                         },
                     ]}
-                    strokeColor="#333" // Dark gray dashed
-                    strokeWidth={walkingRoute?.isActualRoute ? 4 : 3}
-                    lineDashPattern={[10, 5]}
+                    strokeColor="#4CAF50"
+                    strokeWidth={walkingRoute?.isActualRoute ? 5 : 4}
+                    lineDashPattern={[8, 6]}
+                    lineCap="round"
                     geodesic={true}
+                    zIndex={25}
                 />
             </MapView>
 
             {/* Trip Info Bottom Sheet */}
             <DraggableBottomSheet
                 header={
-                    <View style={styles.sheetHeader}>
+                    <View style={styles.sheetHandle}>
                         <View style={styles.sheetHandle} />
 
                         {/* Route Info & Controls */}
@@ -788,6 +864,33 @@ export default function ActiveTripScreen() {
                             </View>
                         )}
 
+                        {/* Horizontal Schedule Display */}
+                        {scheduledTimes.length > 0 && !hasBoarded && (
+                            <View style={styles.scheduleContainer}>
+                                <Text style={styles.scheduleLabel}>Upcoming</Text>
+                                <ScrollView
+                                    horizontal
+                                    showsHorizontalScrollIndicator={false}
+                                    contentContainerStyle={styles.scheduleScroll}
+                                >
+                                    {scheduledTimes.map((time, idx) => (
+                                        <View
+                                            key={`time-${idx}`}
+                                            style={[
+                                                styles.scheduleChip,
+                                                idx === 0 && styles.scheduleChipFirst
+                                            ]}
+                                        >
+                                            <Text style={[
+                                                styles.scheduleChipText,
+                                                idx === 0 && styles.scheduleChipTextFirst
+                                            ]}>{time}</Text>
+                                        </View>
+                                    ))}
+                                </ScrollView>
+                            </View>
+                        )}
+
                         {/* Boarding Actions */}
                         {hasReachedStop && !hasBoarded && (
                             <TouchableOpacity
@@ -807,30 +910,32 @@ export default function ActiveTripScreen() {
                 {/* Scrollable Stops List */}
                 <ScrollView style={styles.stopsListContainer}>
                     <Text style={styles.sectionTitle}>Stops</Text>
-                    {routeStops.map((stop, index) => {
-                        const isTarget = stop.stopId === targetStop?.stopId;
+                    {
+                        routeStops.map((stop, index) => {
+                            const isTarget = stop.stopId === targetStop?.stopId;
 
-                        return (
-                            <View key={`${stop.stopId}-${index}`} style={[styles.stopItem, isTarget && styles.targetStopItem]}>
-                                <View style={styles.stopTimeline}>
-                                    <View style={[styles.timelineLine, { opacity: index === routeStops.length - 1 ? 0 : 1 }]} />
-                                    <View style={[
-                                        styles.timelineDot,
-                                        isTarget && styles.targetTimelineDot
-                                    ]} />
+                            return (
+                                <View key={`${stop.stopId}-${index}`} style={[styles.stopItem, isTarget && styles.targetStopItem]}>
+                                    <View style={styles.stopTimeline}>
+                                        <View style={[styles.timelineLine, { opacity: index === routeStops.length - 1 ? 0 : 1 }]} />
+                                        <View style={[
+                                            styles.timelineDot,
+                                            isTarget && styles.targetTimelineDot
+                                        ]} />
+                                    </View>
+                                    <View style={styles.stopContent}>
+                                        <Text style={[styles.stopNameText, isTarget && styles.targetStopName]}>{stop.stopName}</Text>
+                                        <Text style={styles.stopIdText}>#{stop.stopNo} {isTarget && !hasBoarded && '• Board Here'}</Text>
+                                        {isTarget && hasBoarded && <Text style={styles.targetLabel}>My Destination</Text>}
+                                    </View>
                                 </View>
-                                <View style={styles.stopContent}>
-                                    <Text style={[styles.stopNameText, isTarget && styles.targetStopName]}>{stop.stopName}</Text>
-                                    <Text style={styles.stopIdText}>#{stop.stopNo} {isTarget && !hasBoarded && '• Board Here'}</Text>
-                                    {isTarget && hasBoarded && <Text style={styles.targetLabel}>My Destination</Text>}
-                                </View>
-                            </View>
-                        );
-                    })}
+                            );
+                        })
+                    }
                     <View style={{ height: 40 }} />
-                </ScrollView>
-            </DraggableBottomSheet>
-        </View>
+                </ScrollView >
+            </DraggableBottomSheet >
+        </View >
     );
 }
 
@@ -1088,11 +1193,14 @@ const styles = StyleSheet.create({
         fontWeight: '700',
         color: '#000',
     },
+    targetLabel: {
+        fontSize: 12,
+        fontWeight: '600',
+        color: '#00C853',
+        marginTop: 4,
+    },
     boardNowCard: {
         backgroundColor: '#FF6B6B',
-    },
-    boardNowText: {
-        color: '#fff',
     },
     miniEta: {
         alignItems: 'center',
@@ -1110,20 +1218,6 @@ const styles = StyleSheet.create({
     miniEtaLabel: {
         fontSize: 10,
         color: '#666',
-    },
-    routeStopDot: {
-        width: 10,
-        height: 10,
-        borderRadius: 5,
-        backgroundColor: '#fff',
-        borderWidth: 2,
-        borderColor: '#0066CC',
-    },
-    terminalStopDot: {
-        width: 14,
-        height: 14,
-        borderRadius: 7,
-        borderWidth: 3,
     },
     busDistanceCard: {
         flexDirection: 'row',
@@ -1183,5 +1277,39 @@ const styles = StyleSheet.create({
         fontSize: 16,
         fontWeight: '600',
         color: '#00C853',
+    },
+    // Horizontal Schedule Styles
+    scheduleContainer: {
+        marginTop: 12,
+        marginBottom: 8,
+    },
+    scheduleLabel: {
+        fontSize: 12,
+        fontWeight: '600',
+        color: '#666',
+        marginBottom: 8,
+        textTransform: 'uppercase',
+        letterSpacing: 0.5,
+    },
+    scheduleScroll: {
+        paddingRight: 16,
+    },
+    scheduleChip: {
+        backgroundColor: '#f0f0f0',
+        paddingHorizontal: 14,
+        paddingVertical: 8,
+        borderRadius: 16,
+        marginRight: 8,
+    },
+    scheduleChipFirst: {
+        backgroundColor: '#0066CC',
+    },
+    scheduleChipText: {
+        fontSize: 14,
+        fontWeight: '600',
+        color: '#333',
+    },
+    scheduleChipTextFirst: {
+        color: '#fff',
     },
 });

@@ -1,0 +1,37 @@
+app/active-trip.tsx(825,84): error TS2339: Property 'targetLabel' does not exist on type '{ container: { flex: number; }; loadingContainer: { flex: number; justifyContent: "center"; alignItems: "center"; backgroundColor: string; }; loadingText: { fontSize: number; color: string; }; map: { ...; }; ... 47 more ...; onBoardText: { ...; }; }'.
+app/active-trip.tsx(1114,5): error TS1117: An object literal cannot have multiple properties with the same name.
+app/active-trip.tsx(1122,5): error TS1117: An object literal cannot have multiple properties with the same name.
+app/active-trip.tsx(1152,5): error TS1117: An object literal cannot have multiple properties with the same name.
+app/route-details.tsx(249,25): error TS2322: Type '{ routeNo: string; stopNo: string; scheduledTime: string; estimatedTime: string; delay: number; status: "SCHEDULED"; tripId: string; }[]' is not assignable to type 'TripUpdate[]'.
+  Type '{ routeNo: string; stopNo: string; scheduledTime: string; estimatedTime: string; delay: number; status: "SCHEDULED"; tripId: string; }' is not assignable to type 'TripUpdate'.
+    Types of property 'status' are incompatible.
+      Type '"SCHEDULED"' is not assignable to type '"ON_TIME" | "DELAYED" | "CANCELLED"'.
+app/route-details.tsx(850,17): error TS18048: 'walkingRoute.coordinates.length' is possibly 'undefined'.
+app/route-details.tsx(851,31): error TS18047: 'walkingRoute' is possibly 'null'.
+app/route-details.tsx(852,141): error TS18047: 'walkingRoute' is possibly 'null'.
+app/search.tsx(156,25): error TS2322: Type '{ results: SearchResult[]; onSelect: (result: SearchResult) => void; loading: boolean; }' is not assignable to type 'IntrinsicAttributes & SearchResultsProps'.
+  Property 'loading' does not exist on type 'IntrinsicAttributes & SearchResultsProps'.
+src/components/DraggableBottomSheet.tsx(52,35): error TS2339: Property '_value' does not exist on type 'Value'.
+src/components/SearchResults.tsx(131,13): error TS2769: No overload matches this call.
+  Overload 1 of 2, '(props: SectionListProps<SearchResult, DefaultSectionT>): SectionList<SearchResult, DefaultSectionT>', gave the following error.
+    Type '({ section: { title } }: { section: { title: string; }; }) => React.JSX.Element' is not assignable to type '(info: { section: SectionListData<SearchResult, DefaultSectionT>; }) => ReactElement<unknown, string | JSXElementConstructor<any>> | null'.
+      Types of parameters '__0' and 'info' are incompatible.
+        Type '{ section: SectionListData<SearchResult, DefaultSectionT>; }' is not assignable to type '{ section: { title: string; }; }'.
+          Types of property 'section' are incompatible.
+            Property 'title' is missing in type 'SectionBase<SearchResult, DefaultSectionT> & DefaultSectionT' but required in type '{ title: string; }'.
+  Overload 2 of 2, '(props: SectionListProps<SearchResult, DefaultSectionT>, context: any): SectionList<SearchResult, DefaultSectionT>', gave the following error.
+    Type '({ section: { title } }: { section: { title: string; }; }) => React.JSX.Element' is not assignable to type '(info: { section: SectionListData<SearchResult, DefaultSectionT>; }) => ReactElement<unknown, string | JSXElementConstructor<any>> | null'.
+      Types of parameters '__0' and 'info' are incompatible.
+        Type '{ section: SectionListData<SearchResult, DefaultSectionT>; }' is not assignable to type '{ section: { title: string; }; }'.
+          Types of property 'section' are incompatible.
+            Property 'title' is missing in type 'SectionBase<SearchResult, DefaultSectionT> & DefaultSectionT' but required in type '{ title: string; }'.
+src/services/RoutePlanningService.ts(610,44): error TS2339: Property 'durationMinutes' does not exist on type 'WalkingRoute'.
+src/services/TransLinkService.ts(204,25): error TS2322: Type '"SCHEDULED"' is not assignable to type '"ON_TIME" | "DELAYED" | "CANCELLED"'.
+src/utils/GtfsParser.ts(304,47): error TS2304: Cannot find name 'activePeriod'.
+src/utils/GtfsParser.ts(304,83): error TS2304: Cannot find name 'activePeriod'.
+src/utils/GtfsParser.ts(304,118): error TS2304: Cannot find name 'activePeriod'.
+src/utils/GtfsParser.ts(304,153): error TS2304: Cannot find name 'activePeriod'.
+src/utils/GtfsParser.ts(305,45): error TS2304: Cannot find name 'activePeriod'.
+src/utils/GtfsParser.ts(305,79): error TS2304: Cannot find name 'activePeriod'.
+src/utils/GtfsParser.ts(305,112): error TS2304: Cannot find name 'activePeriod'.
+src/utils/GtfsParser.ts(305,145): error TS2304: Cannot find name 'activePeriod'.

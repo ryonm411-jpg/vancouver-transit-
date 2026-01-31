@@ -262,7 +262,7 @@ export default function RouteDetailsScreen() {
                                 scheduledTime: departureDate.toISOString(),
                                 estimatedTime: departureDate.toISOString(),
                                 delay: 0,
-                                status: 'SCHEDULED' as const,
+                                status: 'ON_TIME' as const,
                                 tripId: `scheduled-${idx}`
                             };
                         });
@@ -847,7 +847,7 @@ export default function RouteDetailsScreen() {
     useEffect(() => {
         const timer = setTimeout(() => {
             // DEBUG: Log walking route coordinates being set
-            if (walkingRoute?.coordinates?.length > 0) {
+            if (walkingRoute && walkingRoute.coordinates && walkingRoute.coordinates.length > 0) {
                 const first = walkingRoute.coordinates[0];
                 console.log(`[RouteDetails] 🚶 Setting walking path: start=(${first.latitude.toFixed(4)}, ${first.longitude.toFixed(4)}), ${walkingRoute.coordinates.length} points`);
             }

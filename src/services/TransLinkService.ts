@@ -8,7 +8,8 @@ import { ROUTE_STOPS } from '../data/routeStops';
 import RealTimeTransitStore from './RealTimeTransitStore';
 
 // Re-export types from shared types file for backward compatibility
-export { TransitRoute, TransitStop, TripUpdate, VehiclePosition } from '../types/transit';
+import { TransitRoute, TransitStop, TripUpdate, VehiclePosition } from '../types/transit';
+export { TransitRoute, TransitStop, TripUpdate, VehiclePosition };
 
 /**
  * Structured ETA response for consistent arrival information
@@ -200,7 +201,7 @@ class TransLinkService {
                         scheduledTime: sched.ExpectedLeaveTime || '',
                         estimatedTime: sched.ExpectedLeaveTime || '',
                         delay: 0, // RTTI estimates are already adjusted
-                        status: 'SCHEDULED' as const,
+                        status: 'ON_TIME' as const,
                         tripId: sched.TripId || `sched-${results.length}`
                     });
                 }

@@ -607,7 +607,7 @@ class RoutePlanningServiceClass {
             return {
                 type: 'walk',
                 distanceMeters: walkRoute.distanceMeters,
-                durationMinutes: walkRoute.durationMinutes,
+                durationMinutes: walkRoute.durationSeconds / 60,
                 startLat,
                 startLon,
                 endLat,

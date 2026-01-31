@@ -39,4 +39,5 @@ export interface VehiclePosition {
     speed: number;
     timestamp: string;
     tripId?: string;
+    vehicleId?: string;
 }

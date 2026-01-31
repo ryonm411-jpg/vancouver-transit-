@@ -16,7 +16,8 @@ export type NotificationType =
     | 'DELAY_ALERT'
     | 'BOARDING_REMINDER'
     | 'ROUTE_SUGGESTION'
-    | 'CHECK_IN_PROMPT';
+    | 'CHECK_IN_PROMPT'
+    | 'ARRIVAL_IMMINENT';
 
 export interface NotificationData {
     type: NotificationType;
@@ -81,6 +82,50 @@ class NotificationService {
                 priority: Notifications.AndroidNotificationPriority.HIGH,
             },
             trigger: null, // Send immediately
+        });
+    }
+
+    /**
+     * Send "bus arriving soon" notification (2 min or 500m threshold)
+     */
+    async sendArrivalImminent(routeNo: string, minutesAway: number): Promise<void> {
+        await Notifications.scheduleNotificationAsync({
+            content: {
+                title: '🚌 Bus Arriving!',
+                body: `Your #${routeNo} bus is ${minutesAway <= 1 ? 'almost here' : `${minutesAway} min away`}`,
+                data: {
+                    type: 'ARRIVAL_IMMINENT',
+                    routeNo,
+                } as NotificationData,
+                sound: true,
+                priority: Notifications.AndroidNotificationPriority.HIGH,
+            },
+            trigger: null,
+        });
+    }
+
+    /**
+     * Send delay notification (3+ min delay compared to scheduled time)
+     */
+    async sendDelayNotification(
+        routeNo: string,
+        delayMinutes: number,
+        originalTime: string,
+        newTime: string
+    ): Promise<void> {
+        await Notifications.scheduleNotificationAsync({
+            content: {
+                title: '🚌 Bus Delayed',
+                body: `#${routeNo} delayed ${delayMinutes} min (was ${originalTime}, now ${newTime})`,
+                data: {
+                    type: 'DELAY_ALERT',
+                    routeNo,
+                    delay: delayMinutes,
+                } as NotificationData,
+                sound: true,
+                priority: Notifications.AndroidNotificationPriority.HIGH,
+            },
+            trigger: null,
         });
     }
 

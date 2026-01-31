@@ -49,7 +49,7 @@ export const DraggableBottomSheet: React.FC<DraggableBottomSheetProps> = ({
                 return Math.abs(gestureState.dy) > 10;
             },
             onPanResponderGrant: () => {
-                pan.setOffset(pan._value);
+                pan.setOffset(lastValue.current);
                 pan.setValue(0);
             },
             onPanResponderMove: Animated.event(

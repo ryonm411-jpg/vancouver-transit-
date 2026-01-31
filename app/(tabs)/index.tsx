@@ -71,6 +71,7 @@ const calculateRouteScore = (
 
 export default function HomeScreen() {
     const router = useRouter();
+    const mapRef = useRef<any>(null);
 
     // Draggable Sheet Logic
     const { height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -86,7 +87,7 @@ export default function HomeScreen() {
                 return Math.abs(gestureState.dy) > 5;
             },
             onPanResponderGrant: () => {
-                pan.setOffset(pan._value);
+                pan.setOffset((pan as any)._value);
                 pan.setValue(0);
             },
             onPanResponderMove: Animated.event(
@@ -368,7 +369,13 @@ export default function HomeScreen() {
                 );
 
                 const routeData: NearbyRoute = {
-                    route,
+                    route: {
+                        routeId: route.id,
+                        routeNo: route.shortName,
+                        routeName: route.longName,
+                        direction: 'BOTH',
+                        destination: route.longName
+                    },
                     stop: bestStop,
                     nextArrival: etaResult.label,
                     minutes: etaResult.minutes,
@@ -473,15 +480,15 @@ export default function HomeScreen() {
                         >
                             {nearbyRoutes.map((route, index) => (
                                 <TouchableOpacity
-                                    key={`${route.route.id}-${index}`}
+                                    key={`${route.route.routeId}-${index}`}
                                     style={styles.routeCard}
                                     onPress={() => {
                                         router.push({
                                             pathname: "/route-details",
                                             params: {
-                                                routeId: route.route.id,
-                                                routeNo: route.route.shortName,
-                                                routeName: route.route.longName,
+                                                routeId: route.route.routeId,
+                                                routeNo: route.route.routeNo,
+                                                routeName: route.route.routeName,
                                                 boardingStopId: route.stop?.stopNo,
                                                 userLat: userLocation?.latitude,
                                                 userLon: userLocation?.longitude
@@ -492,11 +499,11 @@ export default function HomeScreen() {
 
                                     <View style={styles.routeHeader}>
                                         <View style={styles.routeBadge}>
-                                            <Text style={styles.routeNumber}>{route.route.shortName}</Text>
+                                            <Text style={styles.routeNumber}>{route.route.routeNo}</Text>
                                         </View>
                                         <View style={styles.routeInfo}>
                                             <Text style={styles.routeDestination} numberOfLines={1}>
-                                                To {route.route.longName.split('To ')[1] || route.route.longName}
+                                                To {route.route.destination?.split('To ')[1] || route.route.destination}
                                             </Text>
                                             <Text style={styles.stopName} numberOfLines={1}>
                                                 {route.stop?.stopName}

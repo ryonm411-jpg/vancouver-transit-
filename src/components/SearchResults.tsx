@@ -9,6 +9,7 @@ interface SearchResultsProps {
     results: SearchResult[];
     onSelect: (result: SearchResult) => void;
     scrollEnabled?: boolean;
+    loading?: boolean;
 }
 
 export const SearchResults: React.FC<SearchResultsProps> = ({
@@ -109,7 +110,7 @@ export const SearchResults: React.FC<SearchResultsProps> = ({
         </TouchableOpacity>
     );
 
-    const renderSectionHeader = ({ section: { title } }: { section: { title: string } }) => (
+    const renderSectionHeader = ({ section }: { section: SectionListData<SearchResult> }) => (
         <View style={[
             styles.header,
             { backgroundColor: isDark ? '#000000' : '#F2F2F7' }
@@ -118,7 +119,7 @@ export const SearchResults: React.FC<SearchResultsProps> = ({
                 styles.headerTitle,
                 { color: isDark ? '#8E8E93' : '#6E6E73' }
             ]}>
-                {title.toUpperCase()}
+                {section.title.toUpperCase()}
             </Text>
         </View>
     );

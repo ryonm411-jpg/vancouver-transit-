@@ -21,10 +21,10 @@ const PRODUCTION_API_URL = 'https://vancouver-transit.onrender.com';
 export const translinkConfig = {
     apiKey: "chW7YWFXZeKGiBfEJnYD", // Not used for GTFS-RT
     baseUrl: __DEV__
-        ? "http://192.168.1.85:3001/api"
+        ? "http://192.168.1.83:3001/api"
         : `${PRODUCTION_API_URL}/api`,
     gtfsRtUrl: __DEV__
-        ? "http://192.168.1.85:3001/gtfs"
+        ? "http://192.168.1.83:3001/gtfs"
         : `${PRODUCTION_API_URL}/gtfs`
 };
 

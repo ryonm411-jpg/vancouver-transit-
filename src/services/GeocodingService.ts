@@ -58,6 +58,7 @@ export interface SearchResult {
     stopCode?: string; // For stops only
     routeNumber?: string; // For routes only
     score?: number; // Relevance score (composite)
+    address?: string; // e.g. "Vancouver, BC"
 }
 
 // Calculate distance between two points in km (Haversine)
@@ -372,7 +373,6 @@ class GeocodingServiceClass {
                     name: props.name || props.label || 'Unknown',
                     subtitle: props.locality || props.region || 'Vancouver',
                     lat: coords[1],
-                    lon: coords[0],
                     lon: coords[0],
                     distance,
                     score: 90 // High relevance for places to compete with stops
